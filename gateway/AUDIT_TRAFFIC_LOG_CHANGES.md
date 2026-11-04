@@ -99,7 +99,7 @@ All of these are omitted when empty. Each top-level block can be dropped with `e
 
 ## Known limitations and follow-ups
 
-- **Stream terminations are not attributed.** A policy that terminates a response stream mid-flight (`TerminateResponseChunk`) does not produce an ImmediateResponse, because the headers are already sent. It gets no `decision`.
+- **Stream terminations are attributed as `response_body_stream`.** A policy that ends a response stream mid-flight (`TerminateResponseChunk`) cannot produce an ImmediateResponse, because the status line is already committed (the client may see a 2xx). The kernel now records it as `terminalReason=policy_denied` with `deniedBy{policy, version, phase: response_body_stream}`, written authoritatively like the other denials. Verified live with `content-length-guardrail` on an LLM proxy (response limit), where the client received HTTP 200 with the guardrail body. **Follow-up in gateway-controllers:** that guardrail's streaming path returns `TerminateResponseChunk{Body}` and drops the `isGuardrailHit`/`guardrailName` analytics it built, so the line has `decision` but no `guardrail` block until the policy passes `AnalyticsMetadata` through.
 - **401 lines have no identity**, because authentication failed. `operation.path` and request headers on LLM streaming lines are unchanged.
 - **`seq` is per process** (see the migration notes).
 - **Docs and runbook (follow-up task required):** the user and configuration docs (`docs-agent-platform`) for the new blocks, `audit_claims` and the gateway identity keys need a task. So does a runbook note for consumers on `seq`, `eventId` and `decision`.

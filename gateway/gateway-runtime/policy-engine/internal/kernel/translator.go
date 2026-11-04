@@ -1837,6 +1837,15 @@ func TranslateStreamingResponseChunkAction(result *executor.StreamingResponseExe
 		mergeDynamicMetadata(execCtx.dynamicMetadata, dm)
 	}
 
+	// A policy that terminates the stream refuses the response even though the client
+	// may already have seen a 2xx. Attribute it on this (final) chunk's analytics and on
+	// the execution context, so the access-log line carries the denying policy.
+	if result.StreamTerminated {
+		denied := deniedByStreamTermination(result.Results)
+		stampStreamTermination(analyticsData, denied)
+		stampStreamTermination(execCtx.analyticsMetadata, denied)
+	}
+
 	resp := &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_ResponseBody{
 			ResponseBody: &extprocv3.BodyResponse{

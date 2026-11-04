@@ -245,6 +245,47 @@ func deniedByRequestPolicy(
 	return deniedPolicy{}
 }
 
+// deniedByStreamTermination finds the streaming response policy whose
+// TerminateResponseChunk ended the stream. The executor stops the chain at that
+// policy, so it is the last non-skipped result carrying the action. found=false when
+// no policy terminated the stream.
+func deniedByStreamTermination(results []executor.StreamingResponsePolicyResult) deniedPolicy {
+	for i := len(results) - 1; i >= 0; i-- {
+		pr := results[i]
+		if pr.Skipped || pr.Action == nil {
+			continue
+		}
+		if _, ok := pr.Action.(policy.TerminateResponseChunk); ok {
+			return deniedPolicy{pr.PolicyName, pr.PolicyVersion, DeniedPhaseResponseBodyStream, true}
+		}
+	}
+	return deniedPolicy{}
+}
+
+// stampStreamTermination records the engine's attribution for a response stream that
+// a policy terminated with TerminateResponseChunk. There is no ImmediateResponse to
+// classify (the status line is already committed downstream), but the termination is
+// still a policy refusing the response, so it is recorded as policy_denied with the
+// terminating policy and the response_body_stream phase. As in
+// finishShortCircuitAnalytics the keys are written authoritatively and the map is
+// attested, so no policy can forge or suppress them. A no-op when denied is not found.
+func stampStreamTermination(dest map[string]any, denied deniedPolicy) {
+	if dest == nil || !denied.found {
+		return
+	}
+	dest[TerminalReasonKey] = constants.TerminalReasonPolicyDenied
+	delete(dest, DeniedByPolicyKey)
+	delete(dest, DeniedByPolicyVersionKey)
+	if denied.name != "" {
+		dest[DeniedByPolicyKey] = denied.name
+	}
+	if denied.version != "" {
+		dest[DeniedByPolicyVersionKey] = denied.version
+	}
+	dest[DeniedPhaseKey] = denied.phase
+	attestEngineAttribution(dest)
+}
+
 // deniedByResponsePolicy is deniedByRequestPolicy for the response phases.
 func deniedByResponsePolicy(
 	headerResults []executor.ResponseHeaderPolicyResult,

@@ -89,6 +89,11 @@ const (
 	DeniedPhaseRequestBody     = "request_body"
 	DeniedPhaseResponseHeaders = "response_headers"
 	DeniedPhaseResponseBody    = "response_body"
+	// DeniedPhaseResponseBodyStream is a response-body policy that ended a streamed
+	// response mid-flight with TerminateResponseChunk. The status line was already
+	// committed downstream, so the client may see a 2xx even though the policy
+	// refused the response; the phase is what tells an auditor that it happened.
+	DeniedPhaseResponseBodyStream = "response_body_stream"
 )
 
 // convertToStructValue converts a value to structpb.Value, handling complex types like map[string][]string
