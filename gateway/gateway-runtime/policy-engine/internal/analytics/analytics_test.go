@@ -1444,3 +1444,50 @@ func TestPrepareAnalyticEvent_DestinationDropsQueryString(t *testing.T) {
 		})
 	}
 }
+
+// The kernel's terminal-reason and denied-by stamps reach Event.Properties 1:1 for
+// every API kind, so the traffic-log publisher can map them to its decision block.
+func TestPrepareAnalyticEvent_CopiesTerminalReasonAndDeniedBy(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     map[string]string
+		absent   []string
+	}{
+		{
+			name: "policy denial",
+			metadata: map[string]string{
+				APITypeKey:                       "LlmProvider",
+				TerminalReasonKey:                "policy_denied",
+				dto.PropKeyDeniedByPolicy:        "content-length-guardrail",
+				dto.PropKeyDeniedByPolicyVersion: "v0.1.0",
+				dto.PropKeyDeniedPhase:           "request_body",
+			},
+			want: map[string]string{
+				dto.PropKeyTerminalReason:        "policy_denied",
+				dto.PropKeyDeniedByPolicy:        "content-length-guardrail",
+				dto.PropKeyDeniedByPolicyVersion: "v0.1.0",
+				dto.PropKeyDeniedPhase:           "request_body",
+			},
+		},
+		{
+			name:     "pass-through carries none",
+			metadata: map[string]string{APITypeKey: "RestApi"},
+			absent: []string{dto.PropKeyTerminalReason, dto.PropKeyDeniedByPolicy,
+				dto.PropKeyDeniedByPolicyVersion, dto.PropKeyDeniedPhase},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := NewAnalytics(&config.Config{}).prepareAnalyticEvent(createLogEntryWithMetadata(tt.metadata))
+			require.NotNil(t, event)
+			for k, v := range tt.want {
+				assert.Equal(t, v, event.Properties[k], k)
+			}
+			for _, k := range tt.absent {
+				assert.NotContains(t, event.Properties, k)
+			}
+		})
+	}
+	assert.Equal(t, TerminalReasonKey, dto.PropKeyTerminalReason)
+}

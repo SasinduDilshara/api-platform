@@ -56,6 +56,17 @@ const (
 	// up here. Consumed by the stdout traffic-logging publisher's global
 	// "$ctx:metadata['<key>']" property (see internal/analytics/publishers/global_properties.go).
 	PropKeyMetadata = "x-wso2-metadata"
+
+	// PropKeyTerminalReason and the PropKeyDeniedBy* keys carry the engine's own
+	// attribution of a request it ended rather than forwarded: why (one of the
+	// constants.TerminalReason* values), and for a policy denial which policy, which
+	// version, and in which phase ("request_headers"/"request_body"). Stamped by the
+	// kernel (kernel.TerminalReasonKey, kernel.DeniedBy*Key) and copied 1:1 into
+	// Event.Properties by prepareAnalyticEvent. Absent on a pass-through.
+	PropKeyTerminalReason        = "x-wso2-terminal-reason"
+	PropKeyDeniedByPolicy        = "x-wso2-denied-by-policy"
+	PropKeyDeniedByPolicyVersion = "x-wso2-denied-by-policy-version"
+	PropKeyDeniedPhase           = "x-wso2-denied-phase"
 )
 
 // Event represents analytics event data.

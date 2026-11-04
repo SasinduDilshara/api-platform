@@ -495,14 +495,18 @@ func (c *Analytics) prepareAnalyticEvent(logEntry *v3.HTTPAccessLogEntry) *dto.E
 
 	// Auth-context metadata (type, issuer, credential/token IDs, audience, scopes, custom
 	// claims), stamped generically by the collector system policy for any authenticated
-	// request regardless of auth type; plus PropKeyMetadata, the JSON-encoded raw
-	// SharedContext.Metadata bag (see dto.PropKeyMetadata doc comment). Key names match
-	// the raw metadata 1:1 (see dto.PropKeyAuth* doc comment), so no case translation is
-	// needed here.
+	// request regardless of auth type (and by the kernel on a policy short-circuit, where
+	// that policy's response phases never run); plus PropKeyMetadata, the JSON-encoded raw
+	// SharedContext.Metadata bag (see dto.PropKeyMetadata doc comment); plus the kernel's
+	// terminal-reason and denied-by attribution. Key names match the raw metadata 1:1
+	// (see dto.PropKeyAuth* doc comment), so no case translation is needed here.
 	for _, key := range []string{
 		dto.PropKeyAuthType, dto.PropKeyAuthIssuer, dto.PropKeyAuthCredentialID,
 		dto.PropKeyAuthTokenID, dto.PropKeyAuthAudience, dto.PropKeyAuthScopes, dto.PropKeyAuthProperties,
 		dto.PropKeyAuthAuthorized, dto.PropKeyMetadata,
+		// Engine attribution of a short-circuited request (see dto.PropKeyTerminalReason).
+		dto.PropKeyTerminalReason, dto.PropKeyDeniedByPolicy, dto.PropKeyDeniedByPolicyVersion,
+		dto.PropKeyDeniedPhase,
 	} {
 		if v, exists := keyValuePairsFromMetadata[key]; exists && v != "" {
 			event.Properties[key] = v
