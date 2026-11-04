@@ -18,6 +18,9 @@
 package publishers
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"strconv"
@@ -165,6 +168,32 @@ func authContextAuthenticated(props map[string]interface{}) bool {
 
 // buildAuthBlock maps the auth-context properties onto TrafficLogAuth, emitting only
 // the claims named in allowedClaims. Nil when none is present.
+// protectTokenID keeps credential fingerprints out of the log. A token id that is a
+// SHA-256 hex digest is the unsalted hash of a raw credential (api-key-auth, opaque
+// tokens) — the value a key store keeps as its verifier — so it is replaced by
+// "hmac-sha256:" + hex(HMAC-SHA256(key, id)), or dropped when no key is configured.
+// Any other id (a JWT jti) is a token identifier, not a credential, and passes through.
+func protectTokenID(id string, key []byte) string {
+	if !isSHA256Hex(id) {
+		return id
+	}
+	if len(key) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(strings.ToLower(id)))
+	return "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// isSHA256Hex reports whether s is exactly 64 hexadecimal characters.
+func isSHA256Hex(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
 func buildAuthBlock(props map[string]interface{}, allowedClaims map[string]bool) *TrafficLogAuth {
 	a := &TrafficLogAuth{
 		Subject:  propString(props, dto.PropKeyAuthUserID),

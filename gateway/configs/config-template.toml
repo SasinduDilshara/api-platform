@@ -986,14 +986,18 @@ exclude_fields = []
 #   auth       caller identity: subject, authenticated, type, issuer,
 #              clientId, tokenId, audience, scopes, authorized, and claims
 #              (only those named in audit_claims below). tokenId is a token
-#              identifier — a JWT jti, or a SHA-256 fingerprint of an API key
-#              or opaque token — never the token itself, but it is a stable
-#              per-credential correlator; drop it with
-#              exclude_fields = ["auth.tokenId"] if that is not wanted.
+#              identifier: a JWT jti as-is; a credential fingerprint (the
+#              SHA-256 of an API key or opaque token) only as an HMAC keyed by
+#              token_fingerprint_key below, and omitted when no key is set.
+#              Drop it entirely with exclude_fields = ["auth.tokenId"].
 #              Identity is also present on lines for requests a policy denied.
 #   decision   engine attribution: terminalReason, and deniedBy {policy,
 #              version, phase} for a request a policy denied (phase is one of
-#              request_headers, request_body, response_headers, response_body)
+#              request_headers, request_body, response_headers, response_body,
+#              response_body_stream). response_body_stream is a policy that
+#              ended a streamed response mid-flight: the client may already
+#              have received a 2xx status, so decision, not status, is the
+#              record of the refusal.
 #   errorType / error   gateway fault classification
 #   guardrail  {hit, name}
 #   ai         provider, providerVersion, model, requestModel, token counts, cost
@@ -1013,6 +1017,15 @@ environment = ""
 # decoded too.
 audit_claims = ["act"]
 # audit_claims = ["act", "client_id", "ApplicationID"]
+
+# Key for the HMAC that protects credential fingerprints in auth.tokenId. API-key
+# and opaque-token auth report the token id as the unsalted SHA-256 of the raw
+# credential (the verifier a key store keeps), so it is never logged as-is: with a
+# key (>= 32 bytes) it is emitted as "hmac-sha256:" + hex(HMAC-SHA256(key, <sha256
+# hex>)), which a consumer holding the same key and the stored key hashes can join
+# on; without a key it is omitted. Supply the key from a secret, e.g.
+# token_fingerprint_key = '{{ file "/etc/policy-engine/secrets/token-fingerprint-key" }}'
+token_fingerprint_key = ""
 
 # -----------------------------------------------------------------------------
 # "file" sink — read only when outputs contains "file".

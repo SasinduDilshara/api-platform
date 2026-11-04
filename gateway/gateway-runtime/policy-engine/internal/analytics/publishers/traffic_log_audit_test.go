@@ -18,6 +18,9 @@
 package publishers
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -584,4 +587,51 @@ func TestNewLog_AuditClaimsFromConfig(t *testing.T) {
 	l, err = NewLog(&config.TrafficLoggingConfig{})
 	require.NoError(t, err)
 	assert.Empty(t, l.auditClaims)
+}
+
+// A SHA-256 credential fingerprint (api-key-auth reports the unsalted hash of the raw
+// key as its token id) never reaches the log as-is: it is HMAC'd with the configured
+// key, or dropped when none is configured. A JWT jti is not a credential and passes.
+func TestProtectTokenID(t *testing.T) {
+	keyHash := "524b2519787bffeb1942018be9403b48b7e32b9bc7a93f0c8050176af8c1e43c"
+	key := []byte("0123456789abcdef0123456789abcdef")
+
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(keyHash))
+	want := "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
+
+	assert.Equal(t, want, protectTokenID(keyHash, key), "a fingerprint is replaced by its HMAC")
+	assert.Equal(t, want, protectTokenID(strings.ToUpper(keyHash), key), "hex case does not change the HMAC")
+	assert.Equal(t, "", protectTokenID(keyHash, nil), "without a key a fingerprint is dropped")
+	assert.Equal(t, "01a1a615-3f64-7287-b222-d678f4a26e75", protectTokenID("01a1a615-3f64-7287-b222-d678f4a26e75", nil), "a jti passes")
+	assert.Equal(t, "", protectTokenID("", key))
+	assert.Equal(t, keyHash[:63], protectTokenID(keyHash[:63], nil), "not 64 hex characters: not treated as a fingerprint")
+	assert.Equal(t, "zz"+keyHash[2:], protectTokenID("zz"+keyHash[2:], nil), "non-hex is not a fingerprint")
+}
+
+func TestLog_Publish_TokenFingerprint(t *testing.T) {
+	keyHash := "524b2519787bffeb1942018be9403b48b7e32b9bc7a93f0c8050176af8c1e43c"
+	apiKeyEvent := func() *dto.Event {
+		e := createBaseEvent()
+		e.Properties[dto.PropKeyAuthType] = "apikey"
+		e.Properties[dto.PropKeyAuthTokenID] = keyHash
+		return e
+	}
+
+	t.Run("no key: fingerprint omitted, auth type kept", func(t *testing.T) {
+		line := publishLines(t, &config.TrafficLoggingConfig{Enabled: true}, apiKeyEvent())[0]
+		auth := obj(t, line["auth"])
+		assert.Equal(t, "apikey", auth["type"])
+		_, has := auth["tokenId"]
+		assert.False(t, has, "the raw SHA-256 of an API key must never be logged")
+		assert.NotContains(t, fmt.Sprint(line), keyHash)
+	})
+
+	t.Run("with key: HMAC fingerprint", func(t *testing.T) {
+		key := "0123456789abcdef0123456789abcdef"
+		line := publishLines(t, &config.TrafficLoggingConfig{Enabled: true, TokenFingerprintKey: key}, apiKeyEvent())[0]
+		auth := obj(t, line["auth"])
+		assert.Equal(t, protectTokenID(keyHash, []byte(key)), auth["tokenId"])
+		assert.NotContains(t, fmt.Sprint(line), keyHash)
+	})
 }

@@ -1080,6 +1080,26 @@ func TestOnRequestHeaders_MCPFactsFromResolver(t *testing.T) {
 			attrs:   map[string]string{"mcp.body.method": "notifications/initialized", "mcp.body.jsonrpc.id": `"unterminated`},
 			want:    `{"jsonRpcMethod":"notifications/initialized"}`,
 		},
+		{
+			// JSON-RPC ids are strings or numbers only; other JSON values are not logged.
+			name:    "a non-string, non-number id is not reported",
+			headers: map[string][]string{"mcp-protocol-version": {"2025-06-18"}},
+			attrs:   map[string]string{"mcp.body.method": "tools/list", "mcp.body.jsonrpc.id": `{"x":1}`},
+			want:    `{"jsonRpcMethod":"tools/list","capability":"TOOL"}`,
+		},
+		{
+			name:    "a null id is not reported",
+			headers: map[string][]string{"mcp-protocol-version": {"2025-06-18"}},
+			attrs:   map[string]string{"mcp.body.method": "tools/list", "mcp.body.jsonrpc.id": "null"},
+			want:    `{"jsonRpcMethod":"tools/list","capability":"TOOL"}`,
+		},
+		{
+			// Same rendering as the body-parsing path: float64 truncated to an integer.
+			name:    "a fractional id is rendered as the body path renders it",
+			headers: map[string][]string{"mcp-protocol-version": {"2025-06-18"}},
+			attrs:   map[string]string{"mcp.body.method": "tools/list", "mcp.body.jsonrpc.id": "7.9"},
+			want:    `{"jsonRpcMethod":"tools/list","jsonRpcId":"7","capability":"TOOL"}`,
+		},
 	}
 
 	for _, tc := range cases {

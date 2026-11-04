@@ -337,6 +337,16 @@ type TrafficLoggingConfig struct {
 	// emitted, and an empty list emits none. Defaults to ["act"], the RFC 8693
 	// delegation chain, which an audit trail needs to name the acting agent.
 	AuditClaims []string `koanf:"audit_claims"`
+	// TokenFingerprintKey keys the HMAC that protects credential fingerprints in
+	// auth.tokenId. api-key-auth (and opaque-token validation) report the token id as
+	// the unsalted SHA-256 of the raw credential — the same value a key store keeps as
+	// its verifier — so logging it as-is would put the verifiers into widely read logs.
+	// When set (at least 32 bytes; supply it with {{ file }} or {{ env }} interpolation),
+	// such ids are emitted as "hmac-sha256:<hex>" = HMAC-SHA256(key, <the SHA-256 hex>),
+	// which an audit consumer holding the same key and the stored key hashes can still
+	// join on. When empty, credential fingerprints are omitted. Token ids that are not
+	// SHA-256 digests (a JWT jti) are emitted unchanged.
+	TokenFingerprintKey string `koanf:"token_fingerprint_key"`
 }
 
 // TrafficLogFileConfig configures the "file" traffic-log sink
@@ -1522,6 +1532,9 @@ func (c *Config) Validate() error {
 
 	if err := c.validateCollectorConfig(); err != nil {
 		return err
+	}
+	if k := c.TrafficLogging.TokenFingerprintKey; k != "" && len(k) < 32 {
+		return fmt.Errorf("traffic_logging.token_fingerprint_key must be at least 32 bytes when set, got %d", len(k))
 	}
 	if c.TrafficLogging.MaxPayloadSize < 0 {
 		return fmt.Errorf("traffic_logging.max_payload_size must be >= 0, got %d", c.TrafficLogging.MaxPayloadSize)

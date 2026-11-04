@@ -72,6 +72,9 @@ type Log struct {
 	// auditClaims is the set of custom auth claims emitted under auth.claims, from
 	// traffic_logging.audit_claims. Empty means none. Read-only after NewLog.
 	auditClaims map[string]bool
+	// tokenFingerprintKey keys protectTokenID (traffic_logging.token_fingerprint_key).
+	// Nil means credential fingerprints are omitted. Read-only after NewLog.
+	tokenFingerprintKey []byte
 	// seq numbers the lines this publisher emits, starting at 1. There is one Log per
 	// policy-engine process, so it is a per-process (per-replica, per-restart) counter.
 	seq atomic.Uint64
@@ -105,6 +108,9 @@ func NewLog(logCfg *config.TrafficLoggingConfig) (*Log, error) {
 		globalProperties: newGlobalPropertyEvaluator(logCfg.Properties, masked),
 		gateway:          newTrafficLogGateway(logCfg.GatewayID, logCfg.Organization, logCfg.Environment),
 		auditClaims:      make(map[string]bool, len(logCfg.AuditClaims)),
+	}
+	if logCfg.TokenFingerprintKey != "" {
+		l.tokenFingerprintKey = []byte(logCfg.TokenFingerprintKey)
 	}
 	for _, c := range logCfg.AuditClaims {
 		if c = strings.TrimSpace(c); c != "" {

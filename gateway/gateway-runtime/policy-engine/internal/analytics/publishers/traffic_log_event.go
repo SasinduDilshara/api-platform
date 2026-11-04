@@ -175,6 +175,9 @@ func (l *Log) toTrafficLogEvent(event *dto.Event, dir *dto.TrafficLogDirective) 
 
 	// Audit facts the collector already computed into the event.
 	tl.Auth = buildAuthBlock(event.Properties, l.auditClaims)
+	if tl.Auth != nil {
+		tl.Auth.TokenID = protectTokenID(tl.Auth.TokenID, l.tokenFingerprintKey)
+	}
 	tl.Decision = buildDecisionBlock(event.Properties)
 	tl.ErrorType = event.ErrorType
 	tl.Error = event.Error

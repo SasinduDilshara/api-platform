@@ -118,3 +118,25 @@ audit_claims = ["act", "client_id"]
 		assert.Equal(t, []string{"act"}, cfg.TrafficLogging.AuditClaims)
 	})
 }
+
+func TestTrafficLoggingTokenFingerprintKey(t *testing.T) {
+	t.Run("default empty", func(t *testing.T) {
+		assert.Equal(t, "", defaultConfig().TrafficLogging.TokenFingerprintKey)
+	})
+	t.Run("loads a long enough key", func(t *testing.T) {
+		cfg, err := Load(writePEInterpConfig(t, trafficLogIdentityBase+`
+[traffic_logging]
+token_fingerprint_key = "0123456789abcdef0123456789abcdef"
+`))
+		require.NoError(t, err)
+		assert.Equal(t, "0123456789abcdef0123456789abcdef", cfg.TrafficLogging.TokenFingerprintKey)
+	})
+	t.Run("rejects a short key", func(t *testing.T) {
+		_, err := Load(writePEInterpConfig(t, trafficLogIdentityBase+`
+[traffic_logging]
+token_fingerprint_key = "too-short"
+`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "token_fingerprint_key")
+	})
+}

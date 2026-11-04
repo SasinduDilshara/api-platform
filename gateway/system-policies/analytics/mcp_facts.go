@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -108,9 +110,10 @@ func mcpRequestPropsFromResolver(headers *policy.Headers, shared *policy.SharedC
 }
 
 // jsonRPCIDFromToken renders the resolver's JSON-token id the way the body-parsing path
-// renders the id it reads (OnRequestBody): a string id unquoted, a number as its digits. An
-// empty token (a notification) or a malformed quoted token yields "", so the field is omitted
-// rather than reported wrongly.
+// renders the id it reads (OnRequestBody): a string id unquoted, a number through float64
+// to an integer. JSON-RPC allows only a string or a number as an id, so anything else
+// (null, true, an object or array, a malformed token) yields "" and the field is omitted
+// rather than logging a caller-chosen value verbatim. An empty token is a notification.
 func jsonRPCIDFromToken(token string) string {
 	if token == "" {
 		return ""
@@ -122,7 +125,11 @@ func jsonRPCIDFromToken(token string) string {
 		}
 		return s
 	}
-	return token
+	n, err := strconv.ParseFloat(token, 64)
+	if err != nil || math.IsInf(n, 0) || math.IsNaN(n) {
+		return ""
+	}
+	return strconv.FormatInt(int64(n), 10)
 }
 
 // resolutionAttributes returns what the route's resolver published, or a zero value whose Get
