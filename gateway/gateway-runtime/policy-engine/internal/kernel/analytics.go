@@ -65,6 +65,28 @@ const (
 	// is the upstream's and its status says so. The value is one of the
 	// constants.TerminalReason* strings — a closed set, safe as a metric label.
 	TerminalReasonKey = Wso2MetadataPrefix + "terminal-reason"
+
+	// DeniedByPolicyKey, DeniedByPolicyVersionKey and DeniedPhaseKey name the policy
+	// that denied a request with an ImmediateResponse, its version, and the phase
+	// ("request_headers" or "request_body") it ran in. Stamped by
+	// collectShortCircuitAnalytics alongside TerminalReasonKey, and only when that
+	// reason is constants.TerminalReasonPolicyDenied: a policy that answered a request
+	// (a 2xx/3xx ImmediateResponse) did not deny it.
+	//
+	// The executor already records each policy's name and version on its result, but
+	// nothing carried them onto the access log, so a denied line could say that the
+	// policy layer refused the request but not which policy did. Mirrored as
+	// dto.PropKeyDeniedBy* in the analytics package, which copies them into the event.
+	DeniedByPolicyKey        = Wso2MetadataPrefix + "denied-by-policy"
+	DeniedByPolicyVersionKey = Wso2MetadataPrefix + "denied-by-policy-version"
+	DeniedPhaseKey           = Wso2MetadataPrefix + "denied-phase"
+
+	// DeniedPhaseRequestHeaders and DeniedPhaseRequestBody are the DeniedPhaseKey
+	// values. A header policy that runs late on the deferred-binding path is still a
+	// request-headers policy, so the phase names the policy's phase, not the ext_proc
+	// callback that happened to carry it.
+	DeniedPhaseRequestHeaders = "request_headers"
+	DeniedPhaseRequestBody    = "request_body"
 )
 
 // convertToStructValue converts a value to structpb.Value, handling complex types like map[string][]string

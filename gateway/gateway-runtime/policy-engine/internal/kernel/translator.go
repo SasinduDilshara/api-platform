@@ -213,36 +213,11 @@ func translateRequestActionsCore(result *executor.RequestExecutionResult, execCt
 	if result.ShortCircuited && result.FinalAction != nil {
 		if immResp, ok := result.FinalAction.(policy.ImmediateResponse); ok {
 			// Preserve request-phase analytics metadata from policies executed before
-			// the short-circuit action so immediate responses still include it.
-			shortCircuitAnalyticsData := make(map[string]any)
-			for key, value := range execCtx.analyticsMetadata {
-				shortCircuitAnalyticsData[key] = value
-			}
-			for _, policyResult := range result.Results {
-				if policyResult.Skipped || policyResult.Action == nil {
-					continue
-				}
-				mods, ok := policyResult.Action.(policy.UpstreamRequestModifications)
-				if !ok {
-					continue
-				}
-				if mods.AnalyticsMetadata != nil {
-					for key, value := range mods.AnalyticsMetadata {
-						shortCircuitAnalyticsData[key] = value
-					}
-				}
-
-				dropAction := mods.AnalyticsHeaderFilter
-				if dropAction.Action != "" || len(dropAction.Headers) > 0 {
-					originalHeaders := execCtx.requestBodyCtx.Headers.GetAll()
-					shortCircuitAnalyticsData["request_headers"] = finalizeAnalyticsHeaders(dropAction, originalHeaders)
-				}
-			}
-			if immResp.AnalyticsMetadata != nil {
-				for key, value := range immResp.AnalyticsMetadata {
-					shortCircuitAnalyticsData[key] = value
-				}
-			}
+			// the short-circuit action so immediate responses still include it. Routed
+			// through the same collector as every other request-phase short-circuit so
+			// the terminal reason, the denying policy and the caller identity are
+			// stamped here too.
+			shortCircuitAnalyticsData := collectShortCircuitAnalytics(execCtx, nil, result.Results, immResp)
 
 			response := &extprocv3.ProcessingResponse{
 				Response: &extprocv3.ProcessingResponse_ImmediateResponse{
@@ -536,7 +511,13 @@ func collectShortCircuitAnalytics(
 	// Which of the two policy-layer reasons it is depends on the status: a policy
 	// can answer a request as well as refuse it, and a managed Agent Card served
 	// with a 200 or a conditional-GET 304 is not a denial.
-	out[TerminalReasonKey] = terminalReasonForImmediateResponse(immResp.StatusCode)
+	terminalReason := terminalReasonForImmediateResponse(immResp.StatusCode)
+	out[TerminalReasonKey] = terminalReason
+
+	// Name the denying policy, and carry the caller identity and shared metadata the
+	// analytics system policy would only have exported in a response phase that will
+	// now never run. Each key yields to any value a policy already set.
+	stampShortCircuitAudit(execCtx, out, headerResults, bodyResults, terminalReason)
 	return out
 }
 
