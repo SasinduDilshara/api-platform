@@ -936,8 +936,12 @@ outputs = ["stdout"]
 # "stdout" and "file" write straight to their fd and have nothing to flush.
 shutdown_timeout = "5s"
 # Header names (case-insensitive) whose values are redacted as "****" in the
-# logged requestHeaders/responseHeaders.
+# logged requestHeaders/responseHeaders. Only these names are masked: a
+# deployment that authenticates with a custom credential header (for example
+# "x-amp-api-key") must add it here, or its value is logged in clear whenever
+# request_headers is on.
 masked_headers = ["authorization", "x-api-key", "x-jwt-assertion"]
+# masked_headers = ["authorization", "x-api-key", "x-jwt-assertion", "x-amp-api-key"]
 # Max bytes of request/response payload written to each log line (0 = no limit).
 # Applied output-side, so the collector still captures full bodies and other
 # consumers are unaffected.
@@ -966,6 +970,33 @@ exclude_fields = []
 # map wholesale (e.g. `claims = "$ctx:auth.property"`, whose keys vary per token)
 # instead of one flattened property per claim — reach into it to drop just one:
 # exclude_fields = ["properties.claims.internal_debug"]
+
+# Gateway identity stamped on every line as a top-level "gateway" object
+# ({"id", "organization", "environment"}), omitted when all three are empty.
+# Static labels; inject per deployment, e.g. gateway_id = '{{ env "GATEWAY_ID" "" }}'.
+#
+# Every line also carries:
+#   eventId  a UUIDv7 unique to the line
+#   seq      a counter that starts at 1 and increases by one per emitted line,
+#            per policy-engine process (each replica and each restart counts
+#            independently; a gap means a line was lost before serialization)
+# and, when the gateway computed them, these audit blocks — each omitted when
+# empty, none dependent on [collector] request_body/response_body, and each
+# droppable by name in exclude_fields above (e.g. exclude_fields = ["auth"]):
+#   auth       caller identity: subject, type, issuer, clientId, tokenId,
+#              audience, scopes, authorized, claims (custom claims, with a
+#              delegation "act" claim decoded into nested objects)
+#   decision   engine attribution: terminalReason, and deniedBy {policy,
+#              version, phase} for a request a policy denied
+#   errorType / error   gateway fault classification
+#   guardrail  {hit, name}
+#   ai         provider, providerVersion, model, requestModel, token counts, cost
+#   mcp        JSON-RPC method, id, capability, name, resourceUri, sessionId,
+#              clientInfo, isError, errorCode, resultType, serverInfo
+#   a2a        the A2A dimensions of an Agent request
+gateway_id = ""
+organization = ""
+environment = ""
 
 # -----------------------------------------------------------------------------
 # "file" sink — read only when outputs contains "file".

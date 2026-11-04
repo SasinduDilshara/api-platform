@@ -323,6 +323,14 @@ type TrafficLoggingConfig struct {
 	// generically for any authenticated request; other values are emitted as
 	// literal strings.
 	Properties map[string]string `koanf:"properties"`
+	// GatewayID, Organization and Environment identify the emitting gateway on
+	// every line, under a top-level "gateway" object ({id, organization,
+	// environment}). Static operator-supplied labels, typically injected per
+	// deployment via {{ env }} interpolation; each defaults to "" and the whole
+	// object is omitted when all three are empty.
+	GatewayID    string `koanf:"gateway_id"`
+	Organization string `koanf:"organization"`
+	Environment  string `koanf:"environment"`
 }
 
 // TrafficLogFileConfig configures the "file" traffic-log sink
@@ -1255,6 +1263,9 @@ func defaultConfig() *Config {
 			ResponseBody:    false,
 			ExcludeFields:   []string{},
 			Properties:      map[string]string{},
+			GatewayID:       "",
+			Organization:    "",
+			Environment:     "",
 		},
 		Analytics: AnalyticsConfig{
 			Enabled:           false,
