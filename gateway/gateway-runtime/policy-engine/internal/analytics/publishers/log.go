@@ -24,6 +24,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
+
+	"github.com/google/uuid"
 
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/analytics/dto"
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/config"
@@ -62,6 +65,13 @@ type Log struct {
 	// traffic_logging.outputs. Each sink owns its own synchronization, so no lock
 	// is held here across the fan-out.
 	sinks []Sink
+	// gateway is the static gateway identity stamped on every line, built once from
+	// traffic_logging.gateway_id/organization/environment. Nil when none is set, and
+	// shared read-only across concurrent Publish calls.
+	gateway *TrafficLogGateway
+	// seq numbers the lines this publisher emits, starting at 1. There is one Log per
+	// policy-engine process, so it is a per-process (per-replica, per-restart) counter.
+	seq atomic.Uint64
 }
 
 // NewLog creates a new traffic-logging publisher and its configured sinks.
@@ -90,6 +100,7 @@ func NewLog(logCfg *config.TrafficLoggingConfig) (*Log, error) {
 		maxPayloadSize:   logCfg.MaxPayloadSize,
 		globalDir:        buildGlobalDirective(*logCfg),
 		globalProperties: newGlobalPropertyEvaluator(logCfg.Properties, masked),
+		gateway:          newTrafficLogGateway(logCfg.GatewayID, logCfg.Organization, logCfg.Environment),
 	}
 
 	// Only build sinks when traffic logging is on: Publish is a no-op otherwise,
@@ -156,6 +167,7 @@ func (l *Log) Publish(event *dto.Event) {
 
 	dir := l.resolveGlobalDirective(event)
 	tl := l.toTrafficLogEvent(event, dir)
+	l.stampLineIdentity(tl)
 
 	data, err := json.Marshal(tl)
 	if err != nil {
@@ -180,6 +192,20 @@ func (l *Log) Publish(event *dto.Event) {
 	}
 
 	l.write(data)
+}
+
+// stampLineIdentity gives the line its own identity: a UUIDv7 event id (time-ordered,
+// so ids sort by emission time), the next per-process sequence number, and the
+// configured gateway identity. A failure to draw randomness for the id leaves eventId
+// out rather than dropping the line.
+func (l *Log) stampLineIdentity(tl *TrafficLogEvent) {
+	if id, err := uuid.NewV7(); err == nil {
+		tl.EventID = id.String()
+	} else {
+		slog.Warn("Failed to generate traffic-log event id", "error", err)
+	}
+	tl.Seq = l.seq.Add(1)
+	tl.Gateway = l.gateway
 }
 
 // write fans the serialized line out to every configured sink. Each sink handles

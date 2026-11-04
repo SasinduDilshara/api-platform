@@ -323,10 +323,10 @@ func buildGlobalPropertyEvalCtx(event *dto.Event, maskedHeaders map[string]bool)
 		ctx["auth.token_id"] = tokenID
 	}
 	if audience, ok := event.Properties[dto.PropKeyAuthAudience].(string); ok && audience != "" {
-		ctx["auth.audience"] = strings.Split(audience, ",")
+		ctx["auth.audience"] = splitAuthAudience(audience)
 	}
 	if scopes, ok := event.Properties[dto.PropKeyAuthScopes].(string); ok && scopes != "" {
-		ctx["auth.scopes"] = strings.Split(scopes, " ")
+		ctx["auth.scopes"] = splitAuthScopes(scopes)
 	}
 	if raw, ok := event.Properties[dto.PropKeyAuthProperties].(string); ok && raw != "" {
 		var props map[string]string

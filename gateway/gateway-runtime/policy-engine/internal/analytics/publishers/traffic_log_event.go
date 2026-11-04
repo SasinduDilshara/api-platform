@@ -36,15 +36,30 @@ const trafficLogComponent = "pol"
 type TrafficLogEvent struct {
 	// Component names the emitting process, not the record type: the policy
 	// engine's application logs carry the same value.
-	Component       string                   `json:"component,omitempty"`
-	Timestamp       string                   `json:"timestamp,omitempty"`
-	CorrelationID   string                   `json:"correlationId,omitempty"`
-	Status          int                      `json:"status,omitempty"`
-	API             *TrafficLogAPI           `json:"api,omitempty"`
-	Operation       *TrafficLogOperation     `json:"operation,omitempty"`
-	Target          *TrafficLogTarget        `json:"target,omitempty"`
-	Application     *TrafficLogApplication   `json:"application,omitempty"`
-	Client          *TrafficLogClient        `json:"client,omitempty"`
+	Component string `json:"component,omitempty"`
+	// EventID (UUIDv7), Seq and Gateway are stamped per emitted line by Log.Publish,
+	// not by toTrafficLogEvent: they describe the line, not the request.
+	EventID       string                 `json:"eventId,omitempty"`
+	Seq           uint64                 `json:"seq,omitempty"`
+	Timestamp     string                 `json:"timestamp,omitempty"`
+	CorrelationID string                 `json:"correlationId,omitempty"`
+	Gateway       *TrafficLogGateway     `json:"gateway,omitempty"`
+	Status        int                    `json:"status,omitempty"`
+	API           *TrafficLogAPI         `json:"api,omitempty"`
+	Operation     *TrafficLogOperation   `json:"operation,omitempty"`
+	Target        *TrafficLogTarget      `json:"target,omitempty"`
+	Application   *TrafficLogApplication `json:"application,omitempty"`
+	Client        *TrafficLogClient      `json:"client,omitempty"`
+	// Audit blocks, each nil (omitted) when the event carries none of its facts.
+	// None depends on [collector] request_body/response_body.
+	Auth            *TrafficLogAuth          `json:"auth,omitempty"`
+	Decision        *TrafficLogDecision      `json:"decision,omitempty"`
+	ErrorType       string                   `json:"errorType,omitempty"`
+	Error           *dto.Error               `json:"error,omitempty"`
+	Guardrail       *TrafficLogGuardrail     `json:"guardrail,omitempty"`
+	AI              *TrafficLogAI            `json:"ai,omitempty"`
+	MCP             *TrafficLogMCP           `json:"mcp,omitempty"`
+	A2A             *dto.A2AAnalytics        `json:"a2a,omitempty"`
 	Latencies       *dto.TrafficLogLatencies `json:"latencies,omitempty"`
 	RequestHeaders  map[string]string        `json:"requestHeaders,omitempty"`
 	ResponseHeaders map[string]string        `json:"responseHeaders,omitempty"`
@@ -157,6 +172,16 @@ func (l *Log) toTrafficLogEvent(event *dto.Event, dir *dto.TrafficLogDirective) 
 			UserAgent: event.UserAgentHeader,
 		}
 	}
+
+	// Audit facts the collector already computed into the event.
+	tl.Auth = buildAuthBlock(event.Properties)
+	tl.Decision = buildDecisionBlock(event.Properties)
+	tl.ErrorType = event.ErrorType
+	tl.Error = event.Error
+	tl.Guardrail = buildGuardrailBlock(event.Properties)
+	tl.AI = buildAIBlock(event.Properties)
+	tl.MCP = buildMCPBlock(event.Properties)
+	tl.A2A = buildA2ABlock(event.Properties)
 
 	// fields.exclude only trims fields/sub-keys that the per-flow Headers/Payload
 	// booleans below already turned on — it is a subtractive projection over the
