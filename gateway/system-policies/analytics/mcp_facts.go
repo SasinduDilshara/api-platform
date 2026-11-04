@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -25,6 +26,9 @@ const (
 
 	// SHA-256 of params.requestState, the value a client echoes when retrying.
 	attrBodyRequestStateHash = "mcp.body.request.state.hash"
+	// attrBodyJSONRPCID is the request's JSON-RPC id as a JSON token: 7 for a number and
+	// "7" with its quotes for a string. Absent on a notification, which carries no id.
+	attrBodyJSONRPCID = "mcp.body.jsonrpc.id"
 
 	// The first revision to mirror values into headers. Versions are ISO-8601 dates, so string
 	// comparison is chronological.
@@ -89,6 +93,7 @@ func mcpRequestPropsFromResolver(headers *policy.Headers, shared *policy.SharedC
 		props.CapabilityName = target
 	}
 	props.RequestStateHash = attrs.Get(attrBodyRequestStateHash)
+	props.JsonRpcID = jsonRPCIDFromToken(attrs.Get(attrBodyJSONRPCID))
 
 	// The resolver publishes these for both eras. Legacy carries them on initialize only.
 	clientInfo := McpClientInfo{
@@ -100,6 +105,24 @@ func mcpRequestPropsFromResolver(headers *policy.Headers, shared *policy.SharedC
 		props.ClientInfo = &clientInfo
 	}
 	return props
+}
+
+// jsonRPCIDFromToken renders the resolver's JSON-token id the way the body-parsing path
+// renders the id it reads (OnRequestBody): a string id unquoted, a number as its digits. An
+// empty token (a notification) or a malformed quoted token yields "", so the field is omitted
+// rather than reported wrongly.
+func jsonRPCIDFromToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	if token[0] == '"' {
+		var s string
+		if err := json.Unmarshal([]byte(token), &s); err != nil {
+			return ""
+		}
+		return s
+	}
+	return token
 }
 
 // resolutionAttributes returns what the route's resolver published, or a zero value whose Get

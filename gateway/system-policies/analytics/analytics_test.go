@@ -1058,6 +1058,28 @@ func TestOnRequestHeaders_MCPFactsFromResolver(t *testing.T) {
 			},
 			want: `{"jsonRpcMethod":"initialize","clientInfo":{"requestedProtocolVersion":"2025-06-18","name":"LegacyClient","version":"0.9"}}`,
 		},
+		{
+			// The resolver publishes the id as a JSON token; a number is reported as its
+			// digits, as the body-parsing path reports it.
+			name:    "a numeric JSON-RPC id is reported",
+			headers: map[string][]string{"mcp-protocol-version": {"2025-06-18"}},
+			attrs:   map[string]string{"mcp.body.method": "tools/call", "mcp.body.capability.name": "echo", "mcp.body.jsonrpc.id": "3"},
+			want:    `{"jsonRpcMethod":"tools/call","jsonRpcId":"3","capability":"TOOL","capabilityName":"echo"}`,
+		},
+		{
+			name:    "a string JSON-RPC id is reported unquoted",
+			headers: map[string][]string{"mcp-protocol-version": {"2026-07-28"}, "mcp-method": {"tools/list"}},
+			attrs:   map[string]string{"mcp.body.method": "tools/list", "mcp.body.jsonrpc.id": `"req-7"`},
+			want:    `{"jsonRpcMethod":"tools/list","jsonRpcId":"req-7","capability":"TOOL","clientInfo":{"requestedProtocolVersion":"2026-07-28","name":"","version":""}}`,
+		},
+		{
+			// A notification carries no id; a malformed quoted token is dropped, not
+			// reported half-decoded.
+			name:    "no id for a notification or a malformed token",
+			headers: map[string][]string{"mcp-protocol-version": {"2025-06-18"}},
+			attrs:   map[string]string{"mcp.body.method": "notifications/initialized", "mcp.body.jsonrpc.id": `"unterminated`},
+			want:    `{"jsonRpcMethod":"notifications/initialized"}`,
+		},
 	}
 
 	for _, tc := range cases {
