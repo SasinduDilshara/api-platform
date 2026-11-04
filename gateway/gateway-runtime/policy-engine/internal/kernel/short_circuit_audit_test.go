@@ -19,30 +19,45 @@
 package kernel
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/analytics/dto"
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/constants"
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/executor"
+	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/resolver"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
-// shortCircuitCtx builds the minimal execution context collectShortCircuitAnalytics
-// reads: the accumulated analytics, the shared context, and the request body context
-// mergePolicyAnalytics consults for header filters.
+// shortCircuitCtx builds the minimal execution context the short-circuit collectors
+// read: the accumulated analytics, the shared context, and the request/response
+// contexts consulted for header filters.
 func shortCircuitCtx(sc *policy.SharedContext) *PolicyExecutionContext {
 	return &PolicyExecutionContext{
 		analyticsMetadata: map[string]interface{}{},
 		sharedCtx:         sc,
 		requestBodyCtx:    &policy.RequestContext{SharedContext: sc},
+		responseBodyCtx:   &policy.ResponseContext{SharedContext: sc},
 	}
 }
 
 func deny(status int, meta map[string]any) policy.ImmediateResponse {
 	return policy.ImmediateResponse{StatusCode: status, AnalyticsMetadata: meta}
+}
+
+// analyticsOf extracts the analytics_data the ALS access log will read.
+func analyticsOf(t *testing.T, resp *extprocv3.ProcessingResponse) map[string]interface{} {
+	t.Helper()
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.GetImmediateResponse(), "expected an ImmediateResponse")
+	return analyticsFromResponse(t, resp)
 }
 
 // The kernel and the publisher agree on every key by spelling; the analytics package
@@ -72,103 +87,92 @@ func TestShortCircuitAudit_KeysMatchTheEventPropertyKeys(t *testing.T) {
 	assert.Equal(t, "x-wso2-denied-phase", DeniedPhaseKey)
 }
 
-// The expected strings are exactly what populateAuthAnalyticsMetadata in
-// gateway/system-policies/analytics/analytics.go produces for the same AuthContext
-// (audience comma-joined, scopes sorted and space-joined, properties JSON, authorized
-// "true"/"false"). The two must stay byte-identical so the publisher parses one format.
-func TestAuthAnalyticsMetadata_EncodesLikeTheCollector(t *testing.T) {
-	tests := []struct {
-		name string
-		auth *policy.AuthContext
-		want map[string]any
-	}{
-		{
-			name: "nil context stamps nothing",
-			auth: nil,
-			want: nil,
-		},
-		{
-			name: "unauthenticated context stamps nothing",
-			auth: &policy.AuthContext{Authenticated: false, Subject: "alice"},
-			want: nil,
-		},
-		{
-			name: "authenticated without subject stamps nothing",
-			auth: &policy.AuthContext{Authenticated: true},
-			want: nil,
-		},
-		{
-			name: "full jwt layer",
-			auth: &policy.AuthContext{
-				Authenticated: true,
-				Authorized:    true,
-				AuthType:      "jwt",
-				Subject:       "alice",
-				Issuer:        "https://idp.example.com",
-				Audience:      []string{"aud-a", "aud-b"},
-				Scopes:        map[string]bool{"write": true, "read": true, "admin": true},
-				CredentialID:  "client-1",
-				TokenId:       "jti-1",
-				Properties:    map[string]string{"act": `{"sub":"agent-1"}`, "tenant": "t1"},
-			},
-			want: map[string]any{
-				"x-wso2-user-id":            "alice",
-				"x-wso2-auth-type":          "jwt",
-				"x-wso2-auth-issuer":        "https://idp.example.com",
-				"x-wso2-auth-credential-id": "client-1",
-				"x-wso2-auth-token-id":      "jti-1",
-				"x-wso2-auth-audience":      "aud-a,aud-b",
-				"x-wso2-auth-scopes":        "admin read write",
-				"x-wso2-auth-properties":    `{"act":"{\"sub\":\"agent-1\"}","tenant":"t1"}`,
-				"x-wso2-auth-authorized":    "true",
-			},
-		},
-		{
-			name: "authorization false is still stamped",
-			auth: &policy.AuthContext{Authenticated: true, Subject: "bob", AuthType: "mcp/oauth"},
-			want: map[string]any{
-				"x-wso2-user-id":         "bob",
-				"x-wso2-auth-type":       "mcp/oauth",
-				"x-wso2-auth-authorized": "false",
-			},
-		},
-		{
-			name: "chain: first authenticated layer with a subject wins",
-			auth: &policy.AuthContext{
-				Authenticated: false, Subject: "outer-unauth",
-				Previous: &policy.AuthContext{
-					Authenticated: true, AuthType: "apikey", // no subject: skipped
-					Previous: &policy.AuthContext{
-						Authenticated: true, Subject: "inner", AuthType: "jwt",
-						Previous: &policy.AuthContext{Authenticated: true, Subject: "deeper"},
-					},
-				},
-			},
-			want: map[string]any{
-				"x-wso2-user-id":         "inner",
-				"x-wso2-auth-type":       "jwt",
-				"x-wso2-auth-authorized": "false",
-			},
-		},
+// authGoldenPath is the fixture shared with gateway/system-policies/analytics, whose
+// tests run populateAuthAnalyticsMetadata and populateGenericMetadata against the same
+// cases. A test here cannot call the collector directly: the policy-engine module does
+// not depend on the system-policies module, and adding that dependency for a test would
+// put it into this module's go.mod. Both modules asserting one fixture gives the same
+// guarantee — neither encoding can drift without its own tests failing.
+var authGoldenPath = filepath.Join("..", "..", "..", "..", "testdata", "auth_analytics_golden.json")
+
+type authGoldenLayer struct {
+	Authenticated bool              `json:"authenticated"`
+	Authorized    bool              `json:"authorized"`
+	AuthType      string            `json:"authType"`
+	Subject       string            `json:"subject"`
+	Issuer        string            `json:"issuer"`
+	Audience      []string          `json:"audience"`
+	Scopes        []string          `json:"scopes"`
+	CredentialID  string            `json:"credentialId"`
+	TokenID       string            `json:"tokenId"`
+	Properties    map[string]string `json:"properties"`
+}
+
+type authGolden struct {
+	Auth []struct {
+		Name  string            `json:"name"`
+		Chain []authGoldenLayer `json:"chain"`
+		Want  map[string]string `json:"want"`
+	} `json:"auth"`
+	Metadata []struct {
+		Name     string                 `json:"name"`
+		Metadata map[string]interface{} `json:"metadata"`
+		Want     string                 `json:"want"`
+	} `json:"metadata"`
+}
+
+func loadAuthGolden(t *testing.T) authGolden {
+	t.Helper()
+	data, err := os.ReadFile(authGoldenPath)
+	require.NoError(t, err)
+	var g authGolden
+	require.NoError(t, json.Unmarshal(data, &g))
+	require.NotEmpty(t, g.Auth)
+	require.NotEmpty(t, g.Metadata)
+	return g
+}
+
+func goldenChain(layers []authGoldenLayer) *policy.AuthContext {
+	var head *policy.AuthContext
+	for i := len(layers) - 1; i >= 0; i-- {
+		l := layers[i]
+		ac := &policy.AuthContext{
+			Authenticated: l.Authenticated, Authorized: l.Authorized, AuthType: l.AuthType,
+			Subject: l.Subject, Issuer: l.Issuer, Audience: l.Audience, CredentialID: l.CredentialID,
+			TokenId: l.TokenID, Properties: l.Properties, Previous: head,
+		}
+		if len(l.Scopes) > 0 {
+			ac.Scopes = map[string]bool{}
+			for _, sc := range l.Scopes {
+				ac.Scopes[sc] = true
+			}
+		}
+		head = ac
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, authAnalyticsMetadata(tt.auth))
+	return head
+}
+
+func TestAuthAnalyticsMetadata_Golden(t *testing.T) {
+	for _, tc := range loadAuthGolden(t).Auth {
+		t.Run(tc.Name, func(t *testing.T) {
+			var want map[string]any
+			if tc.Want != nil {
+				want = map[string]any{}
+				for k, v := range tc.Want {
+					want[k] = v
+				}
+			}
+			assert.Equal(t, want, authAnalyticsMetadata(goldenChain(tc.Chain)))
 		})
 	}
 }
 
-func TestGenericMetadataAnalytics_MirrorsTheCollectorFilter(t *testing.T) {
-	assert.Equal(t, "", genericMetadataAnalytics(nil))
-	assert.Equal(t, "", genericMetadataAnalytics(map[string]interface{}{"__analytics_stream_acc": []byte("x")}),
-		"only internal keys -> nothing exported")
-	assert.Equal(t, `{"mcp.tool":"orderPizza","n":2}`, genericMetadataAnalytics(map[string]interface{}{
-		"mcp.tool":            "orderPizza",
-		"n":                   2,
-		"__a2a_request_start": 123,
-		"__a2a_first_event":   1,
-		"__a2a_stream_scan":   0,
-	}))
+func TestGenericMetadataAnalytics_Golden(t *testing.T) {
+	for _, tc := range loadAuthGolden(t).Metadata {
+		t.Run(tc.Name, func(t *testing.T) {
+			assert.Equal(t, tc.Want, genericMetadataAnalytics(tc.Metadata))
+		})
+	}
 }
 
 func TestCollectShortCircuitAnalytics_StampsTheDenyingPolicy(t *testing.T) {
@@ -266,11 +270,10 @@ func TestCollectShortCircuitAnalytics_StampsIdentityAndMetadata(t *testing.T) {
 }
 
 func TestCollectShortCircuitAnalytics_UnauthenticatedStampsNoIdentity(t *testing.T) {
-	for _, auth := range []*policy.AuthContext{nil, {Authenticated: false, Subject: "x"}} {
+	for _, auth := range []*policy.AuthContext{nil, {Authenticated: false, Subject: "x"}, {Authenticated: true}} {
 		ec := shortCircuitCtx(&policy.SharedContext{AuthContext: auth})
 		out := collectShortCircuitAnalytics(ec, nil, nil, deny(401, nil))
-		for _, k := range []string{AuthUserIDKey, AuthTypeKey, AuthIssuerKey, AuthCredentialIDKey,
-			AuthTokenIDKey, AuthAudienceKey, AuthScopesKey, AuthPropertiesKey, AuthAuthorizedKey, GenericMetadataKey} {
+		for _, k := range append(authIdentityKeys, GenericMetadataKey) {
 			assert.NotContains(t, out, k)
 		}
 	}
@@ -283,31 +286,107 @@ func TestCollectShortCircuitAnalytics_NilSharedContextIsSafe(t *testing.T) {
 	assert.NotContains(t, out, AuthUserIDKey)
 }
 
-// Values a policy contributed always win over the kernel's stamps.
-func TestCollectShortCircuitAnalytics_DoesNotOverwritePolicyKeys(t *testing.T) {
+// Identity and shared metadata a policy contributed win over the kernel's stamps, and
+// the identity is never assembled from two sources: if any identity key is present,
+// the AuthContext tuple is not stamped at all.
+func TestCollectShortCircuitAnalytics_IdentityComesFromOneSource(t *testing.T) {
 	sc := &policy.SharedContext{
-		AuthContext: &policy.AuthContext{Authenticated: true, Subject: "from-context", AuthType: "jwt"},
+		AuthContext: &policy.AuthContext{Authenticated: true, Subject: "from-context", AuthType: "jwt", Issuer: "https://idp"},
 		Metadata:    map[string]interface{}{"k": "from-context"},
 	}
-	ec := shortCircuitCtx(sc)
-	ec.analyticsMetadata[AuthTypeKey] = "from-earlier-phase"
+
+	t.Run("policy identity present: no AuthContext keys mixed in", func(t *testing.T) {
+		ec := shortCircuitCtx(sc)
+		ec.analyticsMetadata[AuthTypeKey] = "from-earlier-phase"
+		out := collectShortCircuitAnalytics(ec, nil, nil, deny(403, map[string]any{
+			AuthUserIDKey:      "from-rejecting-policy",
+			GenericMetadataKey: `{"k":"from-rejecting-policy"}`,
+		}))
+		assert.Equal(t, "from-rejecting-policy", out[AuthUserIDKey])
+		assert.Equal(t, "from-earlier-phase", out[AuthTypeKey])
+		assert.NotContains(t, out, AuthIssuerKey, "no key may come from the AuthContext once a policy supplied identity")
+		assert.NotContains(t, out, AuthAuthorizedKey)
+		assert.Equal(t, `{"k":"from-rejecting-policy"}`, out[GenericMetadataKey])
+	})
+
+	t.Run("no policy identity: the whole AuthContext tuple", func(t *testing.T) {
+		out := collectShortCircuitAnalytics(shortCircuitCtx(sc), nil, nil, deny(403, nil))
+		assert.Equal(t, "from-context", out[AuthUserIDKey])
+		assert.Equal(t, "jwt", out[AuthTypeKey])
+		assert.Equal(t, "https://idp", out[AuthIssuerKey])
+		assert.Equal(t, "false", out[AuthAuthorizedKey])
+		assert.Equal(t, `{"k":"from-context"}`, out[GenericMetadataKey])
+	})
+}
+
+// The denied-by keys are engine facts. Neither an earlier policy nor the rejecting
+// policy can name a different denier, none survive on an outcome that is not a
+// denial, and a policy cannot assert any of them on a pass-through.
+func TestCollectShortCircuitAnalytics_DeniedByCannotBeForged(t *testing.T) {
+	forged := map[string]any{
+		DeniedByPolicyKey:        "innocent-policy",
+		DeniedByPolicyVersionKey: "v9",
+		DeniedPhaseKey:           "response_body",
+		TerminalReasonKey:        "upstream_response",
+	}
 	headerResults := []executor.RequestHeaderPolicyResult{
-		{PolicyName: "real-policy", PolicyVersion: "v2", Action: deny(403, nil)},
+		{PolicyName: "earlier", PolicyVersion: "v1", Action: policy.UpstreamRequestHeaderModifications{AnalyticsMetadata: forged}},
+		{PolicyName: "real-denier", PolicyVersion: "v2", Action: deny(403, nil)},
 	}
 
-	out := collectShortCircuitAnalytics(ec, headerResults, nil, deny(403, map[string]any{
-		AuthUserIDKey:      "from-rejecting-policy",
-		GenericMetadataKey: `{"k":"from-rejecting-policy"}`,
-		DeniedByPolicyKey:  "self-named",
-	}))
+	t.Run("earlier and rejecting policies forging a denial", func(t *testing.T) {
+		ec := shortCircuitCtx(&policy.SharedContext{})
+		ec.analyticsMetadata[DeniedByPolicyKey] = "from-earlier-phase"
+		out := collectShortCircuitAnalytics(ec, headerResults, nil, deny(403, forged))
+		assert.Equal(t, constants.TerminalReasonPolicyDenied, out[TerminalReasonKey])
+		assert.Equal(t, "real-denier", out[DeniedByPolicyKey])
+		assert.Equal(t, "v2", out[DeniedByPolicyVersionKey])
+		assert.Equal(t, DeniedPhaseRequestHeaders, out[DeniedPhaseKey])
 
-	assert.Equal(t, "from-rejecting-policy", out[AuthUserIDKey])
-	assert.Equal(t, "from-earlier-phase", out[AuthTypeKey])
-	assert.Equal(t, `{"k":"from-rejecting-policy"}`, out[GenericMetadataKey])
-	assert.Equal(t, "self-named", out[DeniedByPolicyKey])
-	assert.Equal(t, "v2", out[DeniedByPolicyVersionKey], "keys the policy did not set are still stamped")
-	assert.Equal(t, DeniedPhaseRequestHeaders, out[DeniedPhaseKey])
-	assert.Equal(t, "false", out[AuthAuthorizedKey])
+		built, err := buildAnalyticsStruct(out, ec)
+		require.NoError(t, err)
+		assert.Equal(t, "real-denier", built.Fields[DeniedByPolicyKey].GetStringValue())
+		assert.Equal(t, constants.TerminalReasonPolicyDenied, built.Fields[TerminalReasonKey].GetStringValue())
+		assert.NotContains(t, built.Fields, engineAttributionMarkerKey, "the marker is never emitted")
+	})
+
+	t.Run("policy answered: forged denied-by is dropped", func(t *testing.T) {
+		answered := []executor.RequestHeaderPolicyResult{
+			{PolicyName: "agent-card", PolicyVersion: "v1", Action: deny(200, nil)},
+		}
+		out := collectShortCircuitAnalytics(shortCircuitCtx(&policy.SharedContext{}), answered, nil, deny(200, forged))
+		assert.Equal(t, constants.TerminalReasonPolicyAnswered, out[TerminalReasonKey])
+		assert.NotContains(t, out, DeniedByPolicyKey)
+		assert.NotContains(t, out, DeniedByPolicyVersionKey)
+		assert.NotContains(t, out, DeniedPhaseKey)
+	})
+
+	t.Run("pass-through: a policy cannot assert engine attribution at all", func(t *testing.T) {
+		built, err := buildAnalyticsStruct(map[string]any{
+			DeniedByPolicyKey: "x", DeniedByPolicyVersionKey: "v", DeniedPhaseKey: "request_headers",
+			TerminalReasonKey: constants.TerminalReasonPolicyDenied, "other": "kept",
+			// copying the marker's name does not help: its value is not the kernel's type
+			engineAttributionMarkerKey: "forged",
+		}, nil)
+		require.NoError(t, err)
+		for _, k := range []string{DeniedByPolicyKey, DeniedByPolicyVersionKey, DeniedPhaseKey, TerminalReasonKey, engineAttributionMarkerKey} {
+			assert.NotContains(t, built.Fields, k)
+		}
+		assert.Equal(t, "kept", built.Fields["other"].GetStringValue())
+	})
+}
+
+// api-key-auth (v1.2.1) authenticates without a subject; its layer is still stamped.
+func TestCollectShortCircuitAnalytics_APIKeyIdentityWithoutSubject(t *testing.T) {
+	sc := &policy.SharedContext{AuthContext: &policy.AuthContext{
+		Authenticated: true, AuthType: "apikey", TokenId: "fp",
+		Properties: map[string]string{"ApplicationID": "app-1"},
+	}}
+	out := collectShortCircuitAnalytics(shortCircuitCtx(sc), nil, nil, deny(429, nil))
+	assert.NotContains(t, out, AuthUserIDKey)
+	assert.Equal(t, "apikey", out[AuthTypeKey])
+	assert.Equal(t, "fp", out[AuthTokenIDKey])
+	assert.Equal(t, `{"ApplicationID":"app-1"}`, out[AuthPropertiesKey])
 }
 
 // The plain request-body path (TranslateRequestBodyActions) used to aggregate its own
@@ -331,15 +410,161 @@ func TestTranslateRequestActionsCore_ShortCircuit_StampsAuditFacts(t *testing.T)
 
 	rsl, err := translateRequestActionsCore(result, ec)
 	require.NoError(t, err)
-	require.NotNil(t, rsl.ImmediateResp)
+	fields := analyticsOf(t, rsl.ImmediateResp)
+	assert.Equal(t, "earlier", fields["source"])
+	assert.Equal(t, constants.TerminalReasonPolicyDenied, fields[TerminalReasonKey])
+	assert.Equal(t, "content-length-guardrail", fields[DeniedByPolicyKey])
+	assert.Equal(t, "v0.1.0", fields[DeniedByPolicyVersionKey])
+	assert.Equal(t, DeniedPhaseRequestBody, fields[DeniedPhaseKey])
+	assert.Equal(t, "alice", fields[AuthUserIDKey])
+	assert.Equal(t, "apikey", fields[AuthTypeKey])
+}
 
-	fields := rsl.ImmediateResp.DynamicMetadata.GetFields()[constants.ExtProcFilterName].
-		GetStructValue().GetFields()["analytics_data"].GetStructValue().GetFields()
-	assert.Equal(t, "earlier", fields["source"].GetStringValue())
-	assert.Equal(t, constants.TerminalReasonPolicyDenied, fields[TerminalReasonKey].GetStringValue())
-	assert.Equal(t, "content-length-guardrail", fields[DeniedByPolicyKey].GetStringValue())
-	assert.Equal(t, "v0.1.0", fields[DeniedByPolicyVersionKey].GetStringValue())
-	assert.Equal(t, DeniedPhaseRequestBody, fields[DeniedPhaseKey].GetStringValue())
-	assert.Equal(t, "alice", fields[AuthUserIDKey].GetStringValue())
-	assert.Equal(t, "apikey", fields[AuthTypeKey].GetStringValue())
+// requestHeaderShortCircuitResponse end to end: the header-phase ImmediateResponse
+// carries attribution and identity onto the wire.
+func TestTranslateRequestHeaderActions_ShortCircuit_StampsAuditFacts(t *testing.T) {
+	sc := &policy.SharedContext{AuthContext: &policy.AuthContext{
+		Authenticated: true, Subject: "alice", AuthType: "mcp/oauth",
+	}}
+	result := &executor.RequestHeaderExecutionResult{
+		ShortCircuited: true,
+		Results: []executor.RequestHeaderPolicyResult{
+			{PolicyName: "mcp-authz", PolicyVersion: "v1.0.0", Action: deny(403, nil)},
+		},
+		FinalAction: deny(403, nil),
+	}
+	resp, err := TranslateRequestHeaderActions(result, nil, shortCircuitCtx(sc))
+	require.NoError(t, err)
+	fields := analyticsOf(t, resp)
+	assert.Equal(t, "mcp-authz", fields[DeniedByPolicyKey])
+	assert.Equal(t, DeniedPhaseRequestHeaders, fields[DeniedPhaseKey])
+	assert.Equal(t, "alice", fields[AuthUserIDKey])
+	assert.Equal(t, "false", fields[AuthAuthorizedKey])
+}
+
+// The deferred-binding path, where the chain is bound at the request-body callback and
+// header and body policies run together, stamps the same facts.
+func TestDeferredBinding_ShortCircuitStampsAuditFacts(t *testing.T) {
+	r := &fakeOperationResolver{name: "body", reqs: resolver.RequestRequirements{Body: resolver.BodyBuffered}, bodyField: "method"}
+	f := newResolutionFixture(t, r)
+	f.route("POST|/rpc|example.com", resolver.RouteResolution{ResolverName: "body"})
+	f.operationChain("SendMessage",
+		&analyticsPolicy{headerMetadata: map[string]any{"auth_subject": "user-7"}},
+		&analyticsPolicy{rejectStatus: 429},
+	)
+
+	execCtx := f.bindPending(t, "POST|/rpc|example.com")
+	execCtx.sharedCtx.AuthContext = &policy.AuthContext{Authenticated: true, Subject: "user-7", AuthType: "jwt"}
+	execCtx.sharedCtx.Metadata = map[string]interface{}{"a2a.task": "t-1"}
+	resp, err := execCtx.processRequestBody(context.Background(),
+		&extprocv3.HttpBody{Body: []byte(`{"method":"SendMessage"}`), EndOfStream: true})
+	require.NoError(t, err)
+
+	fields := analyticsOf(t, resp)
+	assert.Equal(t, "user-7", fields["auth_subject"], "earlier analytics are kept")
+	assert.Equal(t, constants.TerminalReasonPolicyDenied, fields[TerminalReasonKey])
+	assert.Equal(t, "fake", fields[DeniedByPolicyKey], "the test chain names every policy spec \"fake\"")
+	assert.Equal(t, "v1", fields[DeniedByPolicyVersionKey])
+	assert.Equal(t, DeniedPhaseRequestBody, fields[DeniedPhaseKey])
+	assert.Equal(t, "user-7", fields[AuthUserIDKey])
+	assert.Equal(t, "jwt", fields[AuthTypeKey])
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal([]byte(fields[GenericMetadataKey].(string)), &meta))
+	assert.Equal(t, "t-1", meta["a2a.task"], "shared metadata written before the denial is carried")
+}
+
+// requestPhaseAnalytics is what earlier phases left in execCtx.analyticsMetadata.
+func requestPhaseAnalytics() map[string]interface{} {
+	return map[string]interface{}{
+		"request_headers":        `{"x-request-id":"r-1"}`,
+		"mcp_request_properties": `{"jsonRpcMethod":"tools/call","capabilityName":"orderPizza"}`,
+	}
+}
+
+// Response-phase denials (e.g. a response guardrail) keep every analytics fact collected
+// so far — their ImmediateResponse's analytics replace the earlier phases' on the access
+// log — and are attributed like request-phase denials.
+func TestResponseShortCircuit_StampsAuditFactsAndKeepsEarlierAnalytics(t *testing.T) {
+	sc := &policy.SharedContext{
+		AuthContext: &policy.AuthContext{Authenticated: true, Subject: "alice", AuthType: "jwt"},
+		Metadata:    map[string]interface{}{"mcp.tool": "orderPizza"},
+	}
+
+	t.Run("response-header phase", func(t *testing.T) {
+		ec := shortCircuitCtx(sc)
+		ec.analyticsMetadata = requestPhaseAnalytics()
+		result := &executor.ResponseHeaderExecutionResult{
+			ShortCircuited: true,
+			Results: []executor.ResponseHeaderPolicyResult{
+				{PolicyName: "analytics", PolicyVersion: "v1", Action: policy.DownstreamResponseHeaderModifications{
+					AnalyticsMetadata: map[string]any{"response_content_type": "application/json"},
+				}},
+				{PolicyName: "header-guard", PolicyVersion: "v0.2.0", Action: deny(502, map[string]any{"reason": "blocked"})},
+			},
+			FinalAction: deny(502, map[string]any{"reason": "blocked"}),
+		}
+		resp, err := TranslateResponseHeaderActions(result, ec)
+		require.NoError(t, err)
+		fields := analyticsOf(t, resp)
+		assert.Equal(t, `{"x-request-id":"r-1"}`, fields["request_headers"])
+		assert.Contains(t, fields, "mcp_request_properties")
+		assert.Equal(t, "application/json", fields["response_content_type"])
+		assert.Equal(t, "blocked", fields["reason"])
+		assert.Equal(t, constants.TerminalReasonPolicyDenied, fields[TerminalReasonKey])
+		assert.Equal(t, "header-guard", fields[DeniedByPolicyKey])
+		assert.Equal(t, "v0.2.0", fields[DeniedByPolicyVersionKey])
+		assert.Equal(t, DeniedPhaseResponseHeaders, fields[DeniedPhaseKey])
+		assert.Equal(t, "alice", fields[AuthUserIDKey])
+		assert.Equal(t, `{"mcp.tool":"orderPizza"}`, fields[GenericMetadataKey])
+	})
+
+	t.Run("response-body phase keeps the response-header phase identity", func(t *testing.T) {
+		ec := shortCircuitCtx(sc)
+		ec.analyticsMetadata = requestPhaseAnalytics()
+		// The analytics system policy already exported identity at response headers.
+		ec.analyticsMetadata[AuthUserIDKey] = "collector-subject"
+		ec.analyticsMetadata[AuthTypeKey] = "jwt"
+		result := &executor.ResponseExecutionResult{
+			ShortCircuited: true,
+			Results: []executor.ResponsePolicyResult{
+				{PolicyName: "pii-guardrail", PolicyVersion: "v1.1.0", Action: deny(446, nil)},
+			},
+			FinalAction: deny(446, nil),
+		}
+		_, _, _, _, imm, err := translateResponseActionsCore(result, ec)
+		require.NoError(t, err)
+		fields := analyticsOf(t, imm)
+		assert.Contains(t, fields, "request_headers")
+		assert.Equal(t, "pii-guardrail", fields[DeniedByPolicyKey])
+		assert.Equal(t, DeniedPhaseResponseBody, fields[DeniedPhaseKey])
+		assert.Equal(t, "collector-subject", fields[AuthUserIDKey], "identity from one source: the collector's")
+		assert.NotContains(t, fields, AuthAuthorizedKey)
+	})
+
+	t.Run("merged bodyless response: header results count too", func(t *testing.T) {
+		ec := shortCircuitCtx(sc)
+		ec.analyticsMetadata = requestPhaseAnalytics()
+		headerResult := &executor.ResponseHeaderExecutionResult{
+			Results: []executor.ResponseHeaderPolicyResult{
+				{PolicyName: "analytics", PolicyVersion: "v1", Action: policy.DownstreamResponseHeaderModifications{
+					AnalyticsMetadata: map[string]any{"from_header_pass": "yes"},
+				}},
+			},
+		}
+		bodyResult := &executor.ResponseExecutionResult{
+			ShortCircuited: true,
+			Results: []executor.ResponsePolicyResult{
+				{PolicyName: "body-guard", PolicyVersion: "v3", Action: deny(500, nil)},
+			},
+			FinalAction: deny(500, nil),
+		}
+		resp, err := TranslateResponseHeaderActionsWithBodyMerge(headerResult, bodyResult, ec)
+		require.NoError(t, err)
+		fields := analyticsOf(t, resp)
+		assert.Equal(t, "yes", fields["from_header_pass"])
+		assert.Contains(t, fields, "request_headers")
+		assert.Equal(t, "body-guard", fields[DeniedByPolicyKey])
+		assert.Equal(t, DeniedPhaseResponseBody, fields[DeniedPhaseKey])
+		assert.Equal(t, "alice", fields[AuthUserIDKey])
+	})
 }

@@ -497,27 +497,7 @@ func collectShortCircuitAnalytics(
 		}
 	}
 
-	// The rejecting policy wins on any key it also sets.
-	maps.Copy(out, immResp.AnalyticsMetadata)
-
-	// Attribute the outcome to the policy layer. This is the one place where being
-	// short-circuited by a policy is known as a fact rather than inferred from a
-	// status code: an auth denial and an upstream's own 401 are indistinguishable
-	// downstream otherwise, and a success-rate dashboard that cannot separate them
-	// blames the agent for the gateway's rejections. Written last, and not
-	// overridable by a policy, because it describes what the engine did rather than
-	// anything a policy observed.
-	//
-	// Which of the two policy-layer reasons it is depends on the status: a policy
-	// can answer a request as well as refuse it, and a managed Agent Card served
-	// with a 200 or a conditional-GET 304 is not a denial.
-	terminalReason := terminalReasonForImmediateResponse(immResp.StatusCode)
-	out[TerminalReasonKey] = terminalReason
-
-	// Name the denying policy, and carry the caller identity and shared metadata the
-	// analytics system policy would only have exported in a response phase that will
-	// now never run. Each key yields to any value a policy already set.
-	stampShortCircuitAudit(execCtx, out, headerResults, bodyResults, terminalReason)
+	finishShortCircuitAnalytics(execCtx, out, immResp, deniedByRequestPolicy(headerResults, bodyResults))
 	return out
 }
 
@@ -985,7 +965,10 @@ func TranslateResponseHeaderActions(result *executor.ResponseHeaderExecutionResu
 					ImmediateResponse: buildImmediateResponse(immResp),
 				},
 			}
-			analyticsStruct, err := buildAnalyticsStruct(immResp.AnalyticsMetadata, execCtx)
+			// The ImmediateResponse's analytics replace every earlier phase's on the
+			// access log, so carry them, then attribute the rejection.
+			analyticsStruct, err := buildAnalyticsStruct(
+				collectResponseShortCircuitAnalytics(execCtx, result.Results, nil, immResp), execCtx)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build analytics metadata for immediate response: %w", err)
 			}
@@ -1081,7 +1064,10 @@ func TranslateResponseHeaderActionsWithBodyMerge(
 					ImmediateResponse: buildImmediateResponse(immResp),
 				},
 			}
-			analyticsStruct, err := buildAnalyticsStruct(immResp.AnalyticsMetadata, execCtx)
+			// The header policies ran in this same callback and their analytics have
+			// not been emitted on any earlier response, so both passes count.
+			analyticsStruct, err := buildAnalyticsStruct(
+				collectResponseShortCircuitAnalytics(execCtx, headerResult.Results, bodyResult.Results, immResp), execCtx)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build analytics metadata for immediate response: %w", err)
 			}
@@ -1318,8 +1304,10 @@ func translateResponseActionsCore(result *executor.ResponseExecutionResult, exec
 				},
 			}
 
-			// Handle analytics metadata for immediate response
-			analyticsStruct, err := buildAnalyticsStruct(immResp.AnalyticsMetadata, execCtx)
+			// Handle analytics metadata for immediate response: carry what earlier
+			// phases collected, then attribute the rejection.
+			analyticsStruct, err := buildAnalyticsStruct(
+				collectResponseShortCircuitAnalytics(execCtx, nil, result.Results, immResp), execCtx)
 			if err != nil {
 				return nil, nil, nil, nil, nil, fmt.Errorf("failed to build analytics metadata for immediate response: %w", err)
 			}

@@ -511,10 +511,13 @@ func resolutionFailureAnalytics(
 ) *structpb.Struct {
 	fields := make(map[string]any, len(routeFields)+1+len(failure.Attributes))
 	maps.Copy(fields, routeFields)
-	fields[TerminalReasonKey] = terminalReasonForFailure(failure.Kind)
 	for name, value := range failure.Attributes {
 		fields[name] = value
 	}
+	// Written after the route attributes, and attested, so the engine's own reason is
+	// what is emitted.
+	fields[TerminalReasonKey] = terminalReasonForFailure(failure.Kind)
+	attestEngineAttribution(fields)
 
 	built, err := buildAnalyticsStruct(fields, execCtx)
 	if err != nil {

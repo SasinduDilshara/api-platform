@@ -71,7 +71,8 @@ const (
 	// ("request_headers" or "request_body") it ran in. Stamped by
 	// collectShortCircuitAnalytics alongside TerminalReasonKey, and only when that
 	// reason is constants.TerminalReasonPolicyDenied: a policy that answered a request
-	// (a 2xx/3xx ImmediateResponse) did not deny it.
+	// (a 2xx/3xx ImmediateResponse) did not deny it. Like TerminalReasonKey they are
+	// engine facts: a policy-supplied value is never emitted (see skipAnalyticsKey).
 	//
 	// The executor already records each policy's name and version on its result, but
 	// nothing carried them onto the access log, so a denied line could say that the
@@ -81,12 +82,13 @@ const (
 	DeniedByPolicyVersionKey = Wso2MetadataPrefix + "denied-by-policy-version"
 	DeniedPhaseKey           = Wso2MetadataPrefix + "denied-phase"
 
-	// DeniedPhaseRequestHeaders and DeniedPhaseRequestBody are the DeniedPhaseKey
-	// values. A header policy that runs late on the deferred-binding path is still a
-	// request-headers policy, so the phase names the policy's phase, not the ext_proc
-	// callback that happened to carry it.
-	DeniedPhaseRequestHeaders = "request_headers"
-	DeniedPhaseRequestBody    = "request_body"
+	// DeniedPhase* are the DeniedPhaseKey values. A header policy that runs late on the
+	// deferred-binding path is still a request-headers policy, so the phase names the
+	// policy's phase, not the ext_proc callback that happened to carry it.
+	DeniedPhaseRequestHeaders  = "request_headers"
+	DeniedPhaseRequestBody     = "request_body"
+	DeniedPhaseResponseHeaders = "response_headers"
+	DeniedPhaseResponseBody    = "response_body"
 )
 
 // convertToStructValue converts a value to structpb.Value, handling complex types like map[string][]string
@@ -113,8 +115,12 @@ func buildAnalyticsStruct(analyticsData map[string]any, execCtx *PolicyExecution
 	// Start with the analytics data from policies
 	fields := make(map[string]*structpb.Value)
 
-	// Add policy-provided analytics data
+	// Add policy-provided analytics data. The engine attribution keys are emitted only
+	// when the kernel wrote them, never when a policy merely set the same names.
 	for key, value := range analyticsData {
+		if skipAnalyticsKey(analyticsData, key) {
+			continue
+		}
 		val, err := convertToStructValue(value)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert analytics value for key %s: %w", key, err)
