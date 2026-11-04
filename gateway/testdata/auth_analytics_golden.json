@@ -1,0 +1,88 @@
+{
+  "_comment": "Shared golden fixture for the auth/metadata analytics encoding. Asserted by gateway/system-policies/analytics (populateAuthAnalyticsMetadata, populateGenericMetadata) and by the policy-engine kernel (authAnalyticsMetadata, genericMetadataAnalytics), which must produce identical keys and values. 'chain' lists auth layers outermost first; each layer's 'previous' is the next element.",
+  "auth": [
+    {"name": "no auth context", "chain": [], "want": null},
+    {"name": "unauthenticated layer", "chain": [{"authenticated": false, "subject": "carol"}], "want": null},
+    {"name": "authenticated, no subject, no credential", "chain": [{"authenticated": true, "authType": "jwt"}], "want": null},
+    {
+      "name": "full jwt layer",
+      "chain": [{
+        "authenticated": true, "authorized": true, "authType": "jwt", "subject": "alice",
+        "issuer": "https://idp.example.com", "audience": ["aud-a", "aud-b"],
+        "scopes": ["write", "read", "admin"], "credentialId": "client-1", "tokenId": "jti-1",
+        "properties": {"act": "{\"sub\":\"agent-1\"}", "tenant": "t1"}
+      }],
+      "want": {
+        "x-wso2-user-id": "alice",
+        "x-wso2-auth-type": "jwt",
+        "x-wso2-auth-issuer": "https://idp.example.com",
+        "x-wso2-auth-credential-id": "client-1",
+        "x-wso2-auth-token-id": "jti-1",
+        "x-wso2-auth-audience": "aud-a,aud-b",
+        "x-wso2-auth-scopes": "admin read write",
+        "x-wso2-auth-properties": "{\"act\":\"{\\\"sub\\\":\\\"agent-1\\\"}\",\"tenant\":\"t1\"}",
+        "x-wso2-auth-authorized": "true"
+      }
+    },
+    {
+      "name": "authorized false is still stamped",
+      "chain": [{"authenticated": true, "subject": "bob", "authType": "mcp/oauth"}],
+      "want": {"x-wso2-user-id": "bob", "x-wso2-auth-type": "mcp/oauth", "x-wso2-auth-authorized": "false"}
+    },
+    {
+      "name": "api-key-auth v1.2.1 layer: no subject, token id fingerprint",
+      "chain": [{
+        "authenticated": true, "authType": "apikey",
+        "tokenId": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "properties": {"ApplicationID": "app-1", "ApplicationName": "orders"}
+      }],
+      "want": {
+        "x-wso2-auth-type": "apikey",
+        "x-wso2-auth-token-id": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "x-wso2-auth-properties": "{\"ApplicationID\":\"app-1\",\"ApplicationName\":\"orders\"}",
+        "x-wso2-auth-authorized": "false"
+      }
+    },
+    {
+      "name": "credential id alone qualifies",
+      "chain": [{"authenticated": true, "authType": "oauth2", "credentialId": "client-9"}],
+      "want": {"x-wso2-auth-type": "oauth2", "x-wso2-auth-credential-id": "client-9", "x-wso2-auth-authorized": "false"}
+    },
+    {
+      "name": "a layer with a subject is preferred over an earlier credential-only layer",
+      "chain": [
+        {"authenticated": true, "authType": "apikey", "tokenId": "fp-1"},
+        {"authenticated": true, "authType": "jwt", "subject": "inner"}
+      ],
+      "want": {"x-wso2-user-id": "inner", "x-wso2-auth-type": "jwt", "x-wso2-auth-authorized": "false"}
+    },
+    {
+      "name": "chain: first credential-only layer wins when no layer has a subject",
+      "chain": [
+        {"authenticated": false, "authType": "jwt", "subject": "outer-unauth"},
+        {"authenticated": true, "authType": "apikey", "tokenId": "fp-1"},
+        {"authenticated": true, "authType": "apikey", "tokenId": "fp-2"}
+      ],
+      "want": {"x-wso2-auth-type": "apikey", "x-wso2-auth-token-id": "fp-1", "x-wso2-auth-authorized": "false"}
+    },
+    {
+      "name": "chain: first authenticated layer with a subject wins",
+      "chain": [
+        {"authenticated": false, "subject": "outer-unauth"},
+        {"authenticated": true, "authType": "apikey"},
+        {"authenticated": true, "subject": "inner", "authType": "jwt"},
+        {"authenticated": true, "subject": "deeper"}
+      ],
+      "want": {"x-wso2-user-id": "inner", "x-wso2-auth-type": "jwt", "x-wso2-auth-authorized": "false"}
+    }
+  ],
+  "metadata": [
+    {"name": "empty", "metadata": {}, "want": ""},
+    {"name": "only internal keys", "metadata": {"__analytics_stream_acc": "x", "__a2a_stream_scan": 0}, "want": ""},
+    {
+      "name": "internal keys filtered",
+      "metadata": {"mcp.tool": "orderPizza", "n": 2, "__a2a_request_start": 123, "__a2a_first_event": 1},
+      "want": "{\"mcp.tool\":\"orderPizza\",\"n\":2}"
+    }
+  ]
+}

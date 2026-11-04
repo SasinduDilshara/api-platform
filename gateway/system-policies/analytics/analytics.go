@@ -439,65 +439,91 @@ func (a *AnalyticsPolicy) OnRequestHeaders(_ context.Context, reqCtx *policy.Req
 	return policy.UpstreamRequestHeaderModifications{}
 }
 
-// populateAuthAnalyticsMetadata walks authChain (handling layered/multi-auth via
-// AuthContext.Previous) and, for the first layer that is both authenticated and has a
-// non-empty subject, stamps auth-derived analytics metadata into analyticsMetadata —
-// auth-type-agnostic, so it works uniformly for jwt-auth, opaque-token-auth, api-key-auth,
-// mcp-auth, or any future auth policy without that policy needing to export anything
-// itself; it only relies on the common AuthContext type any auth policy already populates.
+// selectAuthLayer picks the auth layer whose identity is exported, walking authChain
+// (layered/multi-auth via AuthContext.Previous): the first authenticated layer with a
+// non-empty subject, else the first authenticated layer that at least identifies its
+// credential (a credential id or a token id). The fallback exists because some auth
+// policies authenticate without a subject — api-key-auth sets AuthType, TokenId (a
+// SHA-256 fingerprint of the key) and application Properties but no Subject — and those
+// calls would otherwise carry no identity at all. Nil when no layer qualifies.
+//
+// Mirrored by selectAuthLayer in the policy-engine kernel
+// (internal/kernel/short_circuit_audit.go), which stamps the same keys on a policy
+// short-circuit; both are pinned by gateway/testdata/auth_analytics_golden.json.
+func selectAuthLayer(authChain *policy.AuthContext) *policy.AuthContext {
+	var fallback *policy.AuthContext
+	for authCtx := authChain; authCtx != nil; authCtx = authCtx.Previous {
+		if !authCtx.Authenticated {
+			continue
+		}
+		if authCtx.Subject != "" {
+			return authCtx
+		}
+		if fallback == nil && (authCtx.CredentialID != "" || authCtx.TokenId != "") {
+			fallback = authCtx
+		}
+	}
+	return fallback
+}
+
+// populateAuthAnalyticsMetadata stamps auth-derived analytics metadata into
+// analyticsMetadata for the layer selectAuthLayer picks — auth-type-agnostic, so it works
+// uniformly for jwt-auth, opaque-token-auth, api-key-auth, mcp-auth, or any future auth
+// policy without that policy needing to export anything itself; it only relies on the
+// common AuthContext type any auth policy already populates.
 // Scopes are sorted and space-joined and audience is comma-joined, matching the
 // log-message policy's own $ctx:auth.* serialization choices for consistency across
 // per-API and global traffic-log properties. Custom claims (Properties) are JSON-encoded,
 // mirroring how captured headers are already carried as a JSON string elsewhere in this
 // file. Fields are omitted (not empty-stringed) when absent, consistent with every other
-// optional key in this policy.
+// optional key in this policy — including the user id for a layer without a subject.
 func populateAuthAnalyticsMetadata(analyticsMetadata map[string]any, authChain *policy.AuthContext) {
-	for authCtx := authChain; authCtx != nil; authCtx = authCtx.Previous {
-		if !authCtx.Authenticated || authCtx.Subject == "" {
-			continue
-		}
-
-		analyticsMetadata[AuthUserIDMetadataKey] = authCtx.Subject
-		if authCtx.AuthType != "" {
-			analyticsMetadata[AuthTypeMetadataKey] = authCtx.AuthType
-		}
-		if authCtx.Issuer != "" {
-			analyticsMetadata[AuthIssuerMetadataKey] = authCtx.Issuer
-		}
-		if authCtx.CredentialID != "" {
-			analyticsMetadata[AuthCredentialIDMetadataKey] = authCtx.CredentialID
-		}
-		if authCtx.TokenId != "" {
-			analyticsMetadata[AuthTokenIDMetadataKey] = authCtx.TokenId
-		}
-		if len(authCtx.Audience) > 0 {
-			analyticsMetadata[AuthAudienceMetadataKey] = strings.Join(authCtx.Audience, ",")
-		}
-		if len(authCtx.Scopes) > 0 {
-			scopes := make([]string, 0, len(authCtx.Scopes))
-			for name := range authCtx.Scopes {
-				scopes = append(scopes, name)
-			}
-			sort.Strings(scopes)
-			analyticsMetadata[AuthScopesMetadataKey] = strings.Join(scopes, " ")
-		}
-		if len(authCtx.Properties) > 0 {
-			if data, err := json.Marshal(authCtx.Properties); err == nil {
-				analyticsMetadata[AuthPropertiesMetadataKey] = string(data)
-			} else {
-				slog.Warn("Analytics system policy: failed to marshal auth properties", "error", err)
-			}
-		}
-		// Authorized is distinct from Authenticated (which this block already gates on):
-		// it reflects a separate authorization check (e.g. mcp-authz) and can genuinely be
-		// false even for an authenticated request, so it's always stamped rather than
-		// omitted-when-zero like the optional fields above.
-		analyticsMetadata[AuthAuthorizedMetadataKey] = strconv.FormatBool(authCtx.Authorized)
-
-		slog.Debug("Analytics system policy: auth-context metadata extracted",
-			"subject", authCtx.Subject, "authType", authCtx.AuthType)
+	authCtx := selectAuthLayer(authChain)
+	if authCtx == nil {
 		return
 	}
+
+	if authCtx.Subject != "" {
+		analyticsMetadata[AuthUserIDMetadataKey] = authCtx.Subject
+	}
+	if authCtx.AuthType != "" {
+		analyticsMetadata[AuthTypeMetadataKey] = authCtx.AuthType
+	}
+	if authCtx.Issuer != "" {
+		analyticsMetadata[AuthIssuerMetadataKey] = authCtx.Issuer
+	}
+	if authCtx.CredentialID != "" {
+		analyticsMetadata[AuthCredentialIDMetadataKey] = authCtx.CredentialID
+	}
+	if authCtx.TokenId != "" {
+		analyticsMetadata[AuthTokenIDMetadataKey] = authCtx.TokenId
+	}
+	if len(authCtx.Audience) > 0 {
+		analyticsMetadata[AuthAudienceMetadataKey] = strings.Join(authCtx.Audience, ",")
+	}
+	if len(authCtx.Scopes) > 0 {
+		scopes := make([]string, 0, len(authCtx.Scopes))
+		for name := range authCtx.Scopes {
+			scopes = append(scopes, name)
+		}
+		sort.Strings(scopes)
+		analyticsMetadata[AuthScopesMetadataKey] = strings.Join(scopes, " ")
+	}
+	if len(authCtx.Properties) > 0 {
+		if data, err := json.Marshal(authCtx.Properties); err == nil {
+			analyticsMetadata[AuthPropertiesMetadataKey] = string(data)
+		} else {
+			slog.Warn("Analytics system policy: failed to marshal auth properties", "error", err)
+		}
+	}
+	// Authorized is distinct from Authenticated (which selectAuthLayer already gates on):
+	// it reflects a separate authorization check (e.g. mcp-authz) and can genuinely be
+	// false even for an authenticated request, so it's always stamped rather than
+	// omitted-when-zero like the optional fields above.
+	analyticsMetadata[AuthAuthorizedMetadataKey] = strconv.FormatBool(authCtx.Authorized)
+
+	slog.Debug("Analytics system policy: auth-context metadata extracted",
+		"subject", authCtx.Subject, "authType", authCtx.AuthType)
 }
 
 // internalMetadataKeys are the SharedContext.Metadata entries this policy writes for
