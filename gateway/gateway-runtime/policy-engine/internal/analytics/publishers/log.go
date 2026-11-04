@@ -69,6 +69,9 @@ type Log struct {
 	// traffic_logging.gateway_id/organization/environment. Nil when none is set, and
 	// shared read-only across concurrent Publish calls.
 	gateway *TrafficLogGateway
+	// auditClaims is the set of custom auth claims emitted under auth.claims, from
+	// traffic_logging.audit_claims. Empty means none. Read-only after NewLog.
+	auditClaims map[string]bool
 	// seq numbers the lines this publisher emits, starting at 1. There is one Log per
 	// policy-engine process, so it is a per-process (per-replica, per-restart) counter.
 	seq atomic.Uint64
@@ -101,6 +104,12 @@ func NewLog(logCfg *config.TrafficLoggingConfig) (*Log, error) {
 		globalDir:        buildGlobalDirective(*logCfg),
 		globalProperties: newGlobalPropertyEvaluator(logCfg.Properties, masked),
 		gateway:          newTrafficLogGateway(logCfg.GatewayID, logCfg.Organization, logCfg.Environment),
+		auditClaims:      make(map[string]bool, len(logCfg.AuditClaims)),
+	}
+	for _, c := range logCfg.AuditClaims {
+		if c = strings.TrimSpace(c); c != "" {
+			l.auditClaims[c] = true
+		}
 	}
 
 	// Only build sinks when traffic logging is on: Publish is a no-op otherwise,

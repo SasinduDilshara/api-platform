@@ -301,3 +301,22 @@ func TestGlobalPropertyEvaluator_NoPropertiesReturnsNilNotEmptyMap(t *testing.T)
 	e := newGlobalPropertyEvaluator(map[string]string{}, nil)
 	assert.Nil(t, e.resolve(createBaseEvent()))
 }
+
+// api-key-auth authenticates without a subject; the collector still exports its layer
+// (with x-wso2-auth-authorized), so auth.authenticated is true while auth.subject is "".
+func TestGlobalPropertyEvaluator_AuthenticatedWithoutSubject(t *testing.T) {
+	e := newGlobalPropertyEvaluator(map[string]string{
+		"authenticated": "$ctx:auth.authenticated",
+		"subject":       "$ctx:auth.subject",
+		"type":          "$ctx:auth.type",
+	}, nil)
+	event := &dto.Event{Properties: map[string]interface{}{
+		dto.PropKeyAuthType:       "apikey",
+		dto.PropKeyAuthTokenID:    "fp",
+		dto.PropKeyAuthAuthorized: "false",
+	}}
+	resolved := e.resolve(event)
+	assert.Equal(t, true, resolved["authenticated"])
+	assert.Equal(t, "", resolved["subject"])
+	assert.Equal(t, "apikey", resolved["type"])
+}

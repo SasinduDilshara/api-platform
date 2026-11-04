@@ -39,7 +39,12 @@ import (
 // and as a decoded map.
 func auditLine(t *testing.T, event *dto.Event) (string, map[string]interface{}) {
 	t.Helper()
-	l := &Log{}
+	return auditLineWithClaims(t, event, map[string]bool{"act": true}) // the default audit_claims
+}
+
+func auditLineWithClaims(t *testing.T, event *dto.Event, claims map[string]bool) (string, map[string]interface{}) {
+	t.Helper()
+	l := &Log{auditClaims: claims}
 	data, err := json.Marshal(l.toTrafficLogEvent(event, &dto.TrafficLogDirective{}))
 	require.NoError(t, err)
 	var m map[string]interface{}
@@ -206,9 +211,8 @@ func TestToTrafficLogEvent_AuditBlocks(t *testing.T) {
 							"sub": "agent-1",
 							"act": map[string]interface{}{"sub": "agent-0"},
 						},
-						"tenant": "t1",
 					},
-				}, obj(t, line["auth"]))
+				}, obj(t, line["auth"]), "only the default audit claim (act) is emitted; tenant is not")
 			},
 		},
 		{
@@ -303,6 +307,54 @@ func TestToTrafficLogEvent_AuditBlocks(t *testing.T) {
 						"policy": "mcp-authz", "version": "v1.0.0", "phase": "request_headers",
 					},
 				}, obj(t, line["decision"]))
+			},
+		},
+		{
+			name: "deniedBy on a non-denial line is not emitted",
+			mutate: func(e *dto.Event) {
+				e.Properties[dto.PropKeyTerminalReason] = constants.TerminalReasonPolicyAnswered
+				e.Properties[dto.PropKeyDeniedByPolicy] = "forged"
+				e.Properties[dto.PropKeyDeniedPhase] = "request_headers"
+			},
+			check: func(t *testing.T, line map[string]interface{}) {
+				d := obj(t, line["decision"])
+				assert.Equal(t, constants.TerminalReasonPolicyAnswered, d["terminalReason"])
+				assert.NotContains(t, d, "deniedBy")
+			},
+		},
+		{
+			name: "deniedBy without any terminal reason emits no decision",
+			mutate: func(e *dto.Event) {
+				e.Properties[dto.PropKeyDeniedByPolicy] = "forged"
+			},
+			check: func(t *testing.T, line map[string]interface{}) {
+				assert.NotContains(t, line, "decision")
+			},
+		},
+		{
+			name: "api-key identity without a subject is authenticated",
+			mutate: func(e *dto.Event) {
+				e.Properties[dto.PropKeyAuthType] = "apikey"
+				e.Properties[dto.PropKeyAuthTokenID] = "fp"
+				e.Properties[dto.PropKeyAuthAuthorized] = "false"
+				e.Properties[dto.PropKeyAuthProperties] = `{"ApplicationID":"app-1","ApplicationName":"orders"}`
+			},
+			check: func(t *testing.T, line map[string]interface{}) {
+				assert.Equal(t, map[string]interface{}{
+					"authenticated": true, "type": "apikey", "tokenId": "fp", "authorized": false,
+				}, obj(t, line["auth"]), "no subject invented; application claims not listed in audit_claims")
+			},
+		},
+		{
+			name: "malformed auth properties yield no claims but keep identity",
+			mutate: func(e *dto.Event) {
+				e.Properties[dto.PropKeyAuthUserID] = "alice"
+				e.Properties[dto.PropKeyAuthProperties] = `{"act":`
+			},
+			check: func(t *testing.T, line map[string]interface{}) {
+				auth := obj(t, line["auth"])
+				assert.Equal(t, "alice", auth["subject"])
+				assert.NotContains(t, auth, "claims")
 			},
 		},
 		{
@@ -474,4 +526,62 @@ func TestLog_Publish_ExcludeFieldsDropsAuditBlocks(t *testing.T) {
 	assert.NotContains(t, line, "auth")
 	assert.Contains(t, line, "decision", "blocks not named stay")
 	assert.Contains(t, line, "eventId")
+}
+
+// auth.claims is an allowlist (traffic_logging.audit_claims): claims are personal data.
+func TestToTrafficLogEvent_AuditClaimsAllowlist(t *testing.T) {
+	props, _ := json.Marshal(map[string]string{
+		"act":       `{"sub":"agent-1"}`,
+		"email":     "alice@example.com",
+		"groups":    `["admins","ops"]`,
+		"client_id": "c-1",
+	})
+	tests := []struct {
+		name   string
+		claims map[string]bool
+		want   map[string]interface{}
+	}{
+		{
+			name:   "default emits only act",
+			claims: map[string]bool{"act": true},
+			want:   map[string]interface{}{"act": map[string]interface{}{"sub": "agent-1"}},
+		},
+		{
+			name:   "empty list emits none",
+			claims: map[string]bool{},
+		},
+		{
+			name:   "custom list, structured values decoded",
+			claims: map[string]bool{"groups": true, "client_id": true, "absent": true},
+			want: map[string]interface{}{
+				"groups":    []interface{}{"admins", "ops"},
+				"client_id": "c-1",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := createBaseEvent()
+			e.Properties[dto.PropKeyAuthUserID] = "alice"
+			e.Properties[dto.PropKeyAuthProperties] = string(props)
+			_, line := auditLineWithClaims(t, e, tt.claims)
+			auth := obj(t, line["auth"])
+			if tt.want == nil {
+				assert.NotContains(t, auth, "claims")
+				return
+			}
+			assert.Equal(t, tt.want, obj(t, auth["claims"]))
+		})
+	}
+}
+
+// NewLog builds the allowlist from config: trimmed, blanks ignored.
+func TestNewLog_AuditClaimsFromConfig(t *testing.T) {
+	l, err := NewLog(&config.TrafficLoggingConfig{AuditClaims: []string{" act ", "", "email"}})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"act": true, "email": true}, l.auditClaims)
+
+	l, err = NewLog(&config.TrafficLoggingConfig{})
+	require.NoError(t, err)
+	assert.Empty(t, l.auditClaims)
 }

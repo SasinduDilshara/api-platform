@@ -977,17 +977,23 @@ exclude_fields = []
 #
 # Every line also carries:
 #   eventId  a UUIDv7 unique to the line
-#   seq      a counter that starts at 1 and increases by one per emitted line,
+#   seq      a counter that starts at 1 and increases by one per line,
 #            per policy-engine process (each replica and each restart counts
-#            independently; a gap means a line was lost before serialization)
+#            independently; a gap means a line was not delivered)
 # and, when the gateway computed them, these audit blocks — each omitted when
 # empty, none dependent on [collector] request_body/response_body, and each
 # droppable by name in exclude_fields above (e.g. exclude_fields = ["auth"]):
-#   auth       caller identity: subject, type, issuer, clientId, tokenId,
-#              audience, scopes, authorized, claims (custom claims, with a
-#              delegation "act" claim decoded into nested objects)
+#   auth       caller identity: subject, authenticated, type, issuer,
+#              clientId, tokenId, audience, scopes, authorized, and claims
+#              (only those named in audit_claims below). tokenId is a token
+#              identifier — a JWT jti, or a SHA-256 fingerprint of an API key
+#              or opaque token — never the token itself, but it is a stable
+#              per-credential correlator; drop it with
+#              exclude_fields = ["auth.tokenId"] if that is not wanted.
+#              Identity is also present on lines for requests a policy denied.
 #   decision   engine attribution: terminalReason, and deniedBy {policy,
-#              version, phase} for a request a policy denied
+#              version, phase} for a request a policy denied (phase is one of
+#              request_headers, request_body, response_headers, response_body)
 #   errorType / error   gateway fault classification
 #   guardrail  {hit, name}
 #   ai         provider, providerVersion, model, requestModel, token counts, cost
@@ -997,6 +1003,16 @@ exclude_fields = []
 gateway_id = ""
 organization = ""
 environment = ""
+
+# Custom auth claims emitted under auth.claims. Claims are personal data (a JWT
+# typically carries email, username, given/family name, groups, ...), so this is
+# an allowlist: only the claim names listed here are emitted, and [] emits none.
+# The default keeps only "act", the RFC 8693 delegation chain naming the agent
+# acting for the user, decoded into nested objects. A listed claim whose value
+# is a JSON object or array (as auth policies flatten structured claims) is
+# decoded too.
+audit_claims = ["act"]
+# audit_claims = ["act", "client_id", "ApplicationID"]
 
 # -----------------------------------------------------------------------------
 # "file" sink — read only when outputs contains "file".
@@ -1216,6 +1232,11 @@ insecure_skip_verify = false
 # zero-value rules as auth.* — metadata itself is always bound to an empty map, but
 # indexing a specific key needs the same `in` guard shown above, e.g.
 # `'applicationId' in metadata ? metadata['applicationId'] : ''`.
+#
+# auth.* and metadata also resolve on lines for requests a policy denied: the
+# engine carries the caller identity and the shared metadata written before the
+# denial onto those lines. That metadata can hold values a policy derived from
+# the (possibly unauthenticated) request, so treat it as untrusted input.
 [traffic_logging.properties]
 # env = "prod"
 # apiName = "$ctx:api.name"

@@ -35,11 +35,6 @@ const (
 	mcpAnalyticsProperty = "mcpAnalytics"
 )
 
-// actClaim is the RFC 8693 actor claim. AuthContext.Properties flattens every claim to
-// a string, so a delegation chain arrives as a JSON-encoded string; it is decoded back
-// into nested objects so act.sub / act.act.sub stay addressable in the log.
-const actClaim = "act"
-
 // TrafficLogGateway identifies the emitting gateway, from [traffic_logging] config.
 type TrafficLogGateway struct {
 	ID           string `json:"id,omitempty"`
@@ -51,8 +46,8 @@ type TrafficLogGateway struct {
 // collector system policy (or, on a policy short-circuit, the kernel) stamps.
 type TrafficLogAuth struct {
 	Subject string `json:"subject,omitempty"`
-	// Authenticated is derived exactly as the global properties' auth.authenticated:
-	// true when a subject is present. Never false-valued — omitted otherwise.
+	// Authenticated is derived exactly as the global properties' auth.authenticated
+	// (see authContextAuthenticated). Never false-valued — omitted otherwise.
 	Authenticated *bool    `json:"authenticated,omitempty"`
 	Type          string   `json:"type,omitempty"`
 	Issuer        string   `json:"issuer,omitempty"`
@@ -61,8 +56,8 @@ type TrafficLogAuth struct {
 	Audience      []string `json:"audience,omitempty"`
 	Scopes        []string `json:"scopes,omitempty"`
 	Authorized    *bool    `json:"authorized,omitempty"`
-	// Claims are AuthContext.Properties — custom claims only; the raw token is
-	// never part of them.
+	// Claims are the AuthContext.Properties named in traffic_logging.audit_claims —
+	// custom claims only; the raw token is never part of them.
 	Claims map[string]any `json:"claims,omitempty"`
 }
 
@@ -159,9 +154,18 @@ func splitAuthScopes(raw string) []string {
 	return strings.Split(raw, " ")
 }
 
-// buildAuthBlock maps the auth-context properties onto TrafficLogAuth. Nil when none
-// is present.
-func buildAuthBlock(props map[string]interface{}) *TrafficLogAuth {
+// authContextAuthenticated reports whether the event carries an authenticated
+// identity. The collector (and the kernel, on a denial) stamps the auth-context keys
+// only for an authenticated layer, and always stamps x-wso2-auth-authorized with them;
+// a layer without a subject — api-key-auth sets none — is still authenticated. Shared
+// with the global properties' auth.authenticated so both agree.
+func authContextAuthenticated(props map[string]interface{}) bool {
+	return propString(props, dto.PropKeyAuthUserID) != "" || propString(props, dto.PropKeyAuthAuthorized) != ""
+}
+
+// buildAuthBlock maps the auth-context properties onto TrafficLogAuth, emitting only
+// the claims named in allowedClaims. Nil when none is present.
+func buildAuthBlock(props map[string]interface{}, allowedClaims map[string]bool) *TrafficLogAuth {
 	a := &TrafficLogAuth{
 		Subject:  propString(props, dto.PropKeyAuthUserID),
 		Type:     propString(props, dto.PropKeyAuthType),
@@ -170,9 +174,9 @@ func buildAuthBlock(props map[string]interface{}) *TrafficLogAuth {
 		TokenID:  propString(props, dto.PropKeyAuthTokenID),
 		Audience: splitAuthAudience(propString(props, dto.PropKeyAuthAudience)),
 		Scopes:   splitAuthScopes(propString(props, dto.PropKeyAuthScopes)),
-		Claims:   decodeAuthClaims(propString(props, dto.PropKeyAuthProperties)),
+		Claims:   decodeAuthClaims(propString(props, dto.PropKeyAuthProperties), allowedClaims),
 	}
-	if a.Subject != "" {
+	if authContextAuthenticated(props) {
 		authenticated := true
 		a.Authenticated = &authenticated
 	}
@@ -182,18 +186,22 @@ func buildAuthBlock(props map[string]interface{}) *TrafficLogAuth {
 		}
 	}
 	if a.Subject == "" && a.Type == "" && a.Issuer == "" && a.ClientID == "" && a.TokenID == "" &&
-		len(a.Audience) == 0 && len(a.Scopes) == 0 && len(a.Claims) == 0 && a.Authorized == nil {
+		len(a.Audience) == 0 && len(a.Scopes) == 0 && len(a.Claims) == 0 && a.Authorized == nil &&
+		a.Authenticated == nil {
 		return nil
 	}
 	return a
 }
 
-// decodeAuthClaims decodes the JSON-encoded AuthContext.Properties. The collector
-// marshals a map[string]string, so every value is a string; the act claim is decoded
-// once more when its string is itself a JSON object, restoring the delegation chain as
-// nested objects. A value that already arrives as an object is kept as-is.
-func decodeAuthClaims(raw string) map[string]any {
-	if raw == "" {
+// decodeAuthClaims decodes the JSON-encoded AuthContext.Properties and keeps only the
+// claims named in allowed (claims are personal data; nothing is emitted unless the
+// operator listed it). The collector marshals a map[string]string, so every value is a
+// string, and auth policies flatten a structured claim (an object or array, e.g. the
+// RFC 8693 act chain or groups) into a JSON string; such a value is decoded back so it
+// stays addressable (act.sub, act.act.sub). A value that already arrives decoded is
+// kept as-is. Malformed input yields no claims.
+func decodeAuthClaims(raw string, allowed map[string]bool) map[string]any {
+	if raw == "" || len(allowed) == 0 {
 		return nil
 	}
 	var claims map[string]any
@@ -201,16 +209,25 @@ func decodeAuthClaims(raw string) map[string]any {
 		slog.Debug("traffic log: failed to parse auth properties metadata", "error", err)
 		return nil
 	}
-	if s, ok := claims[actClaim].(string); ok && strings.HasPrefix(strings.TrimSpace(s), "{") {
-		var act map[string]any
-		if err := json.Unmarshal([]byte(s), &act); err == nil {
-			claims[actClaim] = act
+	out := make(map[string]any, len(allowed))
+	for name, value := range claims {
+		if !allowed[name] {
+			continue
 		}
+		if str, ok := value.(string); ok {
+			if trimmed := strings.TrimSpace(str); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+				var decoded any
+				if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+					value = decoded
+				}
+			}
+		}
+		out[name] = value
 	}
-	if len(claims) == 0 {
+	if len(out) == 0 {
 		return nil
 	}
-	return claims
+	return out
 }
 
 // buildAIBlock maps the collector's aiMetadata/aiTokenUsage/requestModel properties.
@@ -254,6 +271,14 @@ func buildMCPBlock(props map[string]interface{}) *TrafficLogMCP {
 	m, ok := props[mcpAnalyticsProperty].(map[string]interface{})
 	if !ok || len(m) == 0 {
 		return nil
+	}
+	// The collector falls back to the raw strings when a policy's MCP properties did
+	// not parse; they have no fixed shape, so they are not mapped into the block.
+	if _, raw := m["mcp_request_properties"]; raw {
+		slog.Debug("traffic log: unparsed MCP request properties not mapped to the mcp block")
+	}
+	if _, raw := m["mcp_response_properties"]; raw {
+		slog.Debug("traffic log: unparsed MCP response properties not mapped to the mcp block")
 	}
 	str := func(key string) string { s, _ := m[key].(string); return s }
 	mcp := &TrafficLogMCP{
@@ -303,9 +328,17 @@ func buildGuardrailBlock(props map[string]interface{}) *TrafficLogGuardrail {
 	return &TrafficLogGuardrail{Hit: hit, Name: name}
 }
 
-// buildDecisionBlock maps the kernel's terminal-reason and denied-by stamps.
+// buildDecisionBlock maps the kernel's terminal-reason and denied-by stamps. deniedBy
+// is emitted only for a policy_denied outcome: the kernel writes it only then, and a
+// stray value on any other line is not an engine fact.
 func buildDecisionBlock(props map[string]interface{}) *TrafficLogDecision {
 	d := &TrafficLogDecision{TerminalReason: propString(props, dto.PropKeyTerminalReason)}
+	if d.TerminalReason != constants.TerminalReasonPolicyDenied {
+		if d.TerminalReason == "" {
+			return nil
+		}
+		return d
+	}
 	deniedBy := TrafficLogDeniedBy{
 		Policy:  propString(props, dto.PropKeyDeniedByPolicy),
 		Version: propString(props, dto.PropKeyDeniedByPolicyVersion),
@@ -313,9 +346,6 @@ func buildDecisionBlock(props map[string]interface{}) *TrafficLogDecision {
 	}
 	if deniedBy != (TrafficLogDeniedBy{}) {
 		d.DeniedBy = &deniedBy
-	}
-	if d.TerminalReason == "" && d.DeniedBy == nil {
-		return nil
 	}
 	return d
 }

@@ -331,6 +331,12 @@ type TrafficLoggingConfig struct {
 	GatewayID    string `koanf:"gateway_id"`
 	Organization string `koanf:"organization"`
 	Environment  string `koanf:"environment"`
+	// AuditClaims lists the custom auth claims (AuthContext.Properties: every
+	// non-standard JWT claim, e.g. email, groups) emitted under auth.claims on each
+	// line. Claims are personal data, so this is an allowlist: only listed names are
+	// emitted, and an empty list emits none. Defaults to ["act"], the RFC 8693
+	// delegation chain, which an audit trail needs to name the acting agent.
+	AuditClaims []string `koanf:"audit_claims"`
 }
 
 // TrafficLogFileConfig configures the "file" traffic-log sink
@@ -1080,6 +1086,12 @@ func defaultResolvableConfig() map[string]interface{} {
 	}
 }
 
+// defaultAuditClaims returns the auth claims traffic logging emits by default: only
+// the delegation (act) chain.
+func defaultAuditClaims() []string {
+	return []string{"act"}
+}
+
 // defaultMaskedHeaders returns the header names whose values traffic logging redacts
 func defaultMaskedHeaders() []string {
 	return []string{"authorization", "x-api-key", "x-jwt-assertion"}
@@ -1266,6 +1278,7 @@ func defaultConfig() *Config {
 			GatewayID:       "",
 			Organization:    "",
 			Environment:     "",
+			AuditClaims:     defaultAuditClaims(),
 		},
 		Analytics: AnalyticsConfig{
 			Enabled:           false,

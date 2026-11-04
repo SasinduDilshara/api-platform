@@ -302,14 +302,17 @@ func buildGlobalPropertyEvalCtx(event *dto.Event, maskedHeaders map[string]bool)
 
 	// Auth-context, backed by analytics metadata the collector system policy stamps
 	// generically for any authenticated request (see globalPropertyEvaluator doc
-	// comment). auth.subject presence is what auth.authenticated derives from, rather
-	// than a separately stamped flag, since the collector only ever stamps these keys
-	// together, gated on Authenticated && Subject != "" (see populateAuthAnalyticsMetadata
-	// in gateway/system-policies/analytics/analytics.go).
+	// comment). auth.authenticated is derived rather than separately stamped: the
+	// collector stamps these keys only for an authenticated layer, and always with
+	// x-wso2-auth-authorized (see selectAuthLayer/populateAuthAnalyticsMetadata in
+	// gateway/system-policies/analytics/analytics.go), so a subject or that key means
+	// authenticated — including a layer without a subject, such as api-key-auth's.
 	if subject, ok := event.Properties[dto.PropKeyAuthUserID].(string); ok && subject != "" {
 		ctx["auth.subject"] = subject
-		ctx["auth.authenticated"] = true
 	}
+	// An authenticated layer without a subject (api-key-auth sets none) is still
+	// authenticated; see authContextAuthenticated.
+	ctx["auth.authenticated"] = authContextAuthenticated(event.Properties)
 	if authType, ok := event.Properties[dto.PropKeyAuthType].(string); ok {
 		ctx["auth.type"] = authType
 	}

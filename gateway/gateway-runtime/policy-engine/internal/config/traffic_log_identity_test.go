@@ -85,3 +85,36 @@ environment = '{{ env "TL_ENV_UNSET" "fallback-env" }}'
 		assert.Empty(t, cfg.TrafficLogging.Environment)
 	})
 }
+
+func TestTrafficLoggingAuditClaims(t *testing.T) {
+	t.Run("default is act only", func(t *testing.T) {
+		assert.Equal(t, []string{"act"}, defaultConfig().TrafficLogging.AuditClaims)
+		cfg, err := Load(writePEInterpConfig(t, trafficLogIdentityBase))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"act"}, cfg.TrafficLogging.AuditClaims)
+	})
+
+	t.Run("empty list emits none", func(t *testing.T) {
+		cfg, err := Load(writePEInterpConfig(t, trafficLogIdentityBase+`
+[traffic_logging]
+audit_claims = []
+`))
+		require.NoError(t, err)
+		assert.Empty(t, cfg.TrafficLogging.AuditClaims, "an explicit [] must replace the default, not keep act")
+	})
+
+	t.Run("custom list", func(t *testing.T) {
+		cfg, err := Load(writePEInterpConfig(t, trafficLogIdentityBase+`
+[traffic_logging]
+audit_claims = ["act", "client_id"]
+`))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"act", "client_id"}, cfg.TrafficLogging.AuditClaims)
+	})
+
+	t.Run("shipped template matches the default", func(t *testing.T) {
+		cfg, err := Load(filepath.Join("..", "..", "..", "..", "configs", "config-template.toml"))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"act"}, cfg.TrafficLogging.AuditClaims)
+	})
+}
