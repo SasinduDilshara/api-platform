@@ -18,11 +18,13 @@
 package publishers
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/analytics/dto"
+	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/internal/config"
 )
 
 func TestNewGlobalPropertyEvaluator_EmptyConfig(t *testing.T) {
@@ -319,4 +321,37 @@ func TestGlobalPropertyEvaluator_AuthenticatedWithoutSubject(t *testing.T) {
 	assert.Equal(t, true, resolved["authenticated"])
 	assert.Equal(t, "", resolved["subject"])
 	assert.Equal(t, "apikey", resolved["type"])
+}
+
+// "$ctx:auth.token_id" must not re-expose what auth.tokenId protects: an api-key layer
+// reports the unsalted SHA-256 of the raw key, which resolves to the same
+// "hmac-sha256:" fingerprint as the auth block (or "" without a key), while a JWT jti
+// passes through. Checked through NewLog, which hands the key to the evaluator.
+func TestGlobalPropertyEvaluator_TokenIDCredentialFingerprintIsProtected(t *testing.T) {
+	const keyHash = "524b2519787bffeb1942018be9403b48b7e32b9bc7a93f0c8050176af8c1e43c"
+	fingerprintKey := strings.Repeat("k", 32)
+	props := map[string]string{"tokenId": "$ctx:auth.token_id"}
+	apiKeyEvent := func() *dto.Event {
+		return &dto.Event{Properties: map[string]interface{}{
+			dto.PropKeyAuthType:       "apikey",
+			dto.PropKeyAuthTokenID:    keyHash,
+			dto.PropKeyAuthAuthorized: "true",
+		}}
+	}
+
+	withKey, err := NewLog(&config.TrafficLoggingConfig{Properties: props, TokenFingerprintKey: fingerprintKey})
+	require.NoError(t, err)
+	got := withKey.globalProperties.resolve(apiKeyEvent())["tokenId"]
+	assert.Equal(t, protectTokenID(keyHash, []byte(fingerprintKey)), got)
+	assert.NotContains(t, got, keyHash)
+	assert.True(t, strings.HasPrefix(got.(string), "hmac-sha256:"))
+
+	withoutKey, err := NewLog(&config.TrafficLoggingConfig{Properties: props})
+	require.NoError(t, err)
+	assert.Equal(t, "", withoutKey.globalProperties.resolve(apiKeyEvent())["tokenId"])
+
+	jwtEvent := &dto.Event{Properties: map[string]interface{}{
+		dto.PropKeyAuthUserID: "alice", dto.PropKeyAuthTokenID: "jti-abc", dto.PropKeyAuthAuthorized: "true",
+	}}
+	assert.Equal(t, "jti-abc", withoutKey.globalProperties.resolve(jwtEvent)["tokenId"])
 }

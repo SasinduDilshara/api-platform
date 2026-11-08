@@ -112,6 +112,7 @@ func NewLog(logCfg *config.TrafficLoggingConfig) (*Log, error) {
 	if logCfg.TokenFingerprintKey != "" {
 		l.tokenFingerprintKey = []byte(logCfg.TokenFingerprintKey)
 	}
+	l.globalProperties.tokenFingerprintKey = l.tokenFingerprintKey
 	for _, c := range logCfg.AuditClaims {
 		if c = strings.TrimSpace(c); c != "" {
 			l.auditClaims[c] = true

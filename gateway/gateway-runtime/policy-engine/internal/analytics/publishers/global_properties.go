@@ -67,6 +67,12 @@ type globalPropertyEvaluator struct {
 	// property expression cannot re-expose a header (e.g. authorization) that the
 	// emitted requestHeaders/responseHeaders map already redacts.
 	maskedHeaders map[string]bool
+	// tokenFingerprintKey protects auth.token_id the same way the auth block's
+	// tokenId is protected (protectTokenID), so a property expression such as
+	// "$ctx:auth.token_id" cannot re-expose a credential fingerprint — the unsalted
+	// SHA-256 of an API key — that auth.tokenId never emits. Set by NewLog; nil
+	// means such fingerprints resolve to "".
+	tokenFingerprintKey []byte
 }
 
 // newGlobalPropertyEvaluator compiles every "$ctx:" expression once. A
@@ -197,7 +203,7 @@ func (e *globalPropertyEvaluator) resolve(event *dto.Event) map[string]interface
 		return result
 	}
 
-	evalCtx := buildGlobalPropertyEvalCtx(event, e.maskedHeaders)
+	evalCtx := buildGlobalPropertyEvalCtx(event, e.maskedHeaders, e.tokenFingerprintKey)
 	for name, program := range e.compiled {
 		out, _, err := program.Eval(evalCtx)
 		if err != nil {
@@ -222,7 +228,7 @@ func (e *globalPropertyEvaluator) resolve(event *dto.Event) map[string]interface
 // responseHeaders maps (see maskHeaders in log.go), so a property expression
 // like "$ctx:request.header['authorization']" cannot bypass masking and leak a
 // credential the operator explicitly asked to redact.
-func buildGlobalPropertyEvalCtx(event *dto.Event, maskedHeaders map[string]bool) map[string]interface{} {
+func buildGlobalPropertyEvalCtx(event *dto.Event, maskedHeaders map[string]bool, tokenFingerprintKey []byte) map[string]interface{} {
 	ctx := map[string]interface{}{
 		"request.path":        "",
 		"request.method":      "",
@@ -323,7 +329,9 @@ func buildGlobalPropertyEvalCtx(event *dto.Event, maskedHeaders map[string]bool)
 		ctx["auth.credential_id"] = credentialID
 	}
 	if tokenID, ok := event.Properties[dto.PropKeyAuthTokenID].(string); ok {
-		ctx["auth.token_id"] = tokenID
+		// A JWT jti passes through; a credential fingerprint is HMAC-protected or
+		// dropped, exactly as for the auth block's tokenId.
+		ctx["auth.token_id"] = protectTokenID(tokenID, tokenFingerprintKey)
 	}
 	if audience, ok := event.Properties[dto.PropKeyAuthAudience].(string); ok && audience != "" {
 		ctx["auth.audience"] = splitAuthAudience(audience)

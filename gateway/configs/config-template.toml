@@ -990,6 +990,7 @@ exclude_fields = []
 #              SHA-256 of an API key or opaque token) only as an HMAC keyed by
 #              token_fingerprint_key below, and omitted when no key is set.
 #              Drop it entirely with exclude_fields = ["auth.tokenId"].
+#              "$ctx:auth.token_id" in properties is protected the same way.
 #              Identity is also present on lines for requests a policy denied.
 #   decision   engine attribution: terminalReason, and deniedBy {policy,
 #              version, phase} for a request a policy denied (phase is one of
